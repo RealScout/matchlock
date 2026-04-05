@@ -47,6 +47,7 @@ type VMConfig struct {
 	PrebuiltRootfs      string              // Pre-prepared rootfs path (skips internal copy if set)
 	ExtraDisks          []DiskConfig        // Additional block devices to attach
 	SwapPath            string              // Host path to swap disk image (attached as virtio block device)
+	EncryptSwap         bool                // Use dm-crypt encryption on swap device
 }
 
 type Backend interface {

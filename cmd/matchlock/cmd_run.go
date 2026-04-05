@@ -125,6 +125,7 @@ func init() {
 	runCmd.Flags().Int("timeout", api.DefaultTimeoutSeconds, "Timeout in seconds")
 	runCmd.Flags().Int("disk-size", api.DefaultDiskSizeMB, "Disk size in MB")
 	runCmd.Flags().Int("swap-size", 0, "Swap disk size in MB (0 = no swap)")
+	runCmd.Flags().Bool("encrypt-swap", true, "Encrypt swap with dm-crypt (ephemeral key, requires kernel CONFIG_DM_CRYPT)")
 	runCmd.Flags().BoolP("detach", "d", false, "Run sandbox in detached mode (implies --rm=false; incompatible with -t/-i)")
 	runCmd.Flags().BoolP("tty", "t", false, "Allocate a pseudo-TTY")
 	runCmd.Flags().BoolP("interactive", "i", false, "Keep STDIN open")
@@ -160,6 +161,7 @@ func init() {
 	viper.BindPFlag("run.timeout", runCmd.Flags().Lookup("timeout"))
 	viper.BindPFlag("run.disk-size", runCmd.Flags().Lookup("disk-size"))
 	viper.BindPFlag("run.swap-size", runCmd.Flags().Lookup("swap-size"))
+	viper.BindPFlag("run.encrypt-swap", runCmd.Flags().Lookup("encrypt-swap"))
 	viper.BindPFlag("run.detach", runCmd.Flags().Lookup("detach"))
 	viper.BindPFlag("run.tty", runCmd.Flags().Lookup("tty"))
 	viper.BindPFlag("run.interactive", runCmd.Flags().Lookup("interactive"))
@@ -181,6 +183,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 	memory, _ := cmd.Flags().GetInt("memory")
 	diskSize, _ := cmd.Flags().GetInt("disk-size")
 	swapSize, _ := cmd.Flags().GetInt("swap-size")
+	encryptSwap, _ := cmd.Flags().GetBool("encrypt-swap")
 	timeout, _ := cmd.Flags().GetInt("timeout")
 
 	// Exec options
@@ -399,6 +402,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			MemoryMB:       memory,
 			DiskSizeMB:     diskSize,
 			SwapSizeMB:     swapSize,
+			EncryptSwap:    encryptSwap,
 			TimeoutSeconds: timeout,
 		},
 		Network: &api.NetworkConfig{

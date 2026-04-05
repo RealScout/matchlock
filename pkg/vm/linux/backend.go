@@ -340,6 +340,9 @@ func (m *LinuxMachine) generateFirecrackerConfig() []byte {
 		if m.config.SwapPath != "" {
 			kernelArgs += fmt.Sprintf(" matchlock.swap=vd%c", devLetter)
 			devLetter++
+			if m.config.EncryptSwap {
+				kernelArgs += " matchlock.encrypt_swap=1"
+			}
 		}
 		for i, mapping := range m.config.AddHosts {
 			kernelArgs += fmt.Sprintf(" matchlock.add_host.%d=%s,%s", i, mapping.Host, mapping.IP)

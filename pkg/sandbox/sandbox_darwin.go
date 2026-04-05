@@ -258,6 +258,7 @@ func New(ctx context.Context, config *api.Config, opts *Options) (sb *Sandbox, r
 		PrebuiltRootfs:      bootstrapRootfsPath,
 		ExtraDisks:          extraDisks,
 		SwapPath:            swapPath,
+		EncryptSwap:         config.Resources != nil && config.Resources.EncryptSwap,
 		DNSServers:          config.Network.GetDNSServers(),
 		Hostname:            hostname,
 		AddHosts:            config.Network.AddHosts,

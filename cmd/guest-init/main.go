@@ -76,7 +76,8 @@ type bootConfig struct {
 	MTU        int
 	NoNetwork  bool
 	Disks      []diskMount
-	SwapDevice string // e.g. "vde" — swapon /dev/vde
+	SwapDevice  string // e.g. "vde" — swapon /dev/vde
+	EncryptSwap bool   // use dm-crypt on swap device
 	Overlay    overlayBootConfig
 }
 
@@ -142,7 +143,7 @@ func runInit() {
 		fatal(err)
 	}
 	if cfg.SwapDevice != "" {
-		enableSwap(cfg.SwapDevice)
+		enableSwap(cfg.SwapDevice, cfg.EncryptSwap)
 	}
 
 	if cfg.Workspace != "" {
@@ -227,6 +228,10 @@ func parseBootConfig(cmdlinePath string) (*bootConfig, error) {
 			if v != "" {
 				cfg.SwapDevice = v
 			}
+
+		case strings.HasPrefix(field, "matchlock.encrypt_swap="):
+			v := strings.TrimPrefix(field, "matchlock.encrypt_swap=")
+			cfg.EncryptSwap = v == "1" || strings.EqualFold(v, "true")
 
 		case strings.HasPrefix(field, "matchlock.disk."):
 			spec := strings.TrimPrefix(field, "matchlock.disk.")
@@ -682,15 +687,19 @@ func interfaceHasIPv4(name string) (bool, error) {
 	return false, nil
 }
 
-func enableSwap(device string) {
+func enableSwap(device string, encrypt bool) {
 	devPath := filepath.Join("/dev", device)
 
-	// Try encrypted swap via dm-crypt first. Falls back to unencrypted
-	// if dm-crypt is not available (kernel without CONFIG_DM_CRYPT).
-	swapDev, err := setupEncryptedSwap(devPath)
-	if err != nil {
-		warnf("encrypted swap setup failed, using unencrypted: %v", err)
-		swapDev = devPath
+	swapDev := devPath
+	if encrypt {
+		var err error
+		swapDev, err = setupEncryptedSwap(devPath)
+		if err != nil {
+			warnf("encrypted swap setup failed, using unencrypted: %v", err)
+			swapDev = devPath
+		}
+	}
+	if swapDev == devPath {
 		if err := writeSwapHeader(swapDev); err != nil {
 			warnf("format swap %s: %v", swapDev, err)
 			return

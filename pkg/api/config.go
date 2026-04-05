@@ -71,6 +71,7 @@ type Resources struct {
 	MemoryMB       int           `json:"memory_mb,omitempty"`
 	DiskSizeMB     int           `json:"disk_size_mb,omitempty"`
 	SwapSizeMB     int           `json:"swap_size_mb,omitempty"`
+	EncryptSwap    bool          `json:"encrypt_swap,omitempty"`
 	TimeoutSeconds int           `json:"timeout_seconds,omitempty"`
 	Timeout        time.Duration `json:"-"`
 }
