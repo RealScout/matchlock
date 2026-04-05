@@ -46,6 +46,7 @@ type VMConfig struct {
 	NoNetwork           bool                // Disable guest network interface entirely
 	PrebuiltRootfs      string              // Pre-prepared rootfs path (skips internal copy if set)
 	ExtraDisks          []DiskConfig        // Additional block devices to attach
+	SwapPath            string              // Host path to swap disk image (attached as virtio block device)
 }
 
 type Backend interface {

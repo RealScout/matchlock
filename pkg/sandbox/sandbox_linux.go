@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"runtime"
 
 	"github.com/jingkaihe/matchlock/internal/errx"
@@ -234,6 +235,16 @@ func New(ctx context.Context, config *api.Config, opts *Options) (sb *Sandbox, r
 		return nil, err
 	}
 
+	var swapPath string
+	if config.Resources != nil && config.Resources.SwapSizeMB > 0 {
+		swapPath = filepath.Join(stateMgr.Dir(id), "swap.img")
+		if err := createSwapImage(swapPath, int64(config.Resources.SwapSizeMB)); err != nil {
+			releaseSubnet()
+			stateMgr.Unregister(id)
+			return nil, errx.With(ErrCreateVM, " swap: %w", err)
+		}
+	}
+
 	gatewayIP := ""
 	guestIP := ""
 	subnetCIDR := ""
@@ -263,6 +274,7 @@ func New(ctx context.Context, config *api.Config, opts *Options) (sb *Sandbox, r
 		Workspace:           workspace,
 		Privileged:          config.Privileged,
 		ExtraDisks:          extraDisks,
+		SwapPath:            swapPath,
 		DNSServers:          config.Network.GetDNSServers(),
 		Hostname:            hostname,
 		AddHosts:            config.Network.AddHosts,

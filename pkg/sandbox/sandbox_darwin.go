@@ -217,6 +217,17 @@ func New(ctx context.Context, config *api.Config, opts *Options) (sb *Sandbox, r
 		return nil, err
 	}
 
+	// Create swap disk image if requested.
+	var swapPath string
+	if config.Resources != nil && config.Resources.SwapSizeMB > 0 {
+		swapPath = filepath.Join(stateMgr.Dir(id), "swap.img")
+		if err := createSwapImage(swapPath, int64(config.Resources.SwapSizeMB)); err != nil {
+			releaseSubnet()
+			stateMgr.Unregister(id)
+			return nil, errx.With(ErrCreateVM, " swap: %w", err)
+		}
+	}
+
 	gatewayIP := ""
 	guestIP := ""
 	subnetCIDR := ""
@@ -246,6 +257,7 @@ func New(ctx context.Context, config *api.Config, opts *Options) (sb *Sandbox, r
 		Privileged:          config.Privileged,
 		PrebuiltRootfs:      bootstrapRootfsPath,
 		ExtraDisks:          extraDisks,
+		SwapPath:            swapPath,
 		DNSServers:          config.Network.GetDNSServers(),
 		Hostname:            hostname,
 		AddHosts:            config.Network.AddHosts,

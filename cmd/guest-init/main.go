@@ -74,6 +74,7 @@ type bootConfig struct {
 	MTU        int
 	NoNetwork  bool
 	Disks      []diskMount
+	SwapDevice string // e.g. "vde" — swapon /dev/vde
 	Overlay    overlayBootConfig
 }
 
@@ -137,6 +138,9 @@ func runInit() {
 	}
 	if err := mountExtraDisks(cfg.Disks); err != nil {
 		fatal(err)
+	}
+	if cfg.SwapDevice != "" {
+		enableSwap(cfg.SwapDevice)
 	}
 
 	if cfg.Workspace != "" {
@@ -215,6 +219,12 @@ func parseBootConfig(cmdlinePath string) (*bootConfig, error) {
 		case strings.HasPrefix(field, "matchlock.no_network="):
 			v := strings.TrimPrefix(field, "matchlock.no_network=")
 			cfg.NoNetwork = v == "1" || strings.EqualFold(v, "true")
+
+		case strings.HasPrefix(field, "matchlock.swap="):
+			v := strings.TrimPrefix(field, "matchlock.swap=")
+			if v != "" {
+				cfg.SwapDevice = v
+			}
 
 		case strings.HasPrefix(field, "matchlock.disk."):
 			spec := strings.TrimPrefix(field, "matchlock.disk.")
@@ -668,6 +678,85 @@ func interfaceHasIPv4(name string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+func enableSwap(device string) {
+	devPath := filepath.Join("/dev", device)
+
+	if err := writeSwapHeader(devPath); err != nil {
+		warnf("format swap %s: %v", devPath, err)
+		return
+	}
+
+	pathBytes, err := unix.BytePtrFromString(devPath)
+	if err != nil {
+		warnf("swapon %s: invalid path: %v", devPath, err)
+		return
+	}
+	_, _, errno := unix.Syscall(unix.SYS_SWAPON, uintptr(unsafe.Pointer(pathBytes)), 0, 0)
+	if errno != 0 {
+		warnf("swapon %s failed: %v", devPath, errno)
+	}
+}
+
+// writeSwapHeader writes a minimal Linux swap header so the kernel accepts
+// the device via swapon. Layout (page size = 4096):
+//
+//	offset 1024: reserved (boot sector area)
+//	offset 4086: "SWAPSPACE2" magic (10 bytes at end of first page)
+//
+// swap_header (from include/linux/swap.h) at offset 1024:
+//
+//	u32 version  = 1
+//	u32 last_page = (device_size / page_size) - 1
+//	u32 nr_badpages = 0
+//	char uuid[16]
+//	char volume[16]
+//	u32 padding[117]
+//
+// Then the magic "SWAPSPACE2" at bytes 4086-4095 of the first page.
+func writeSwapHeader(devPath string) error {
+	const pageSize = 4096
+
+	f, err := os.OpenFile(devPath, os.O_RDWR, 0)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	// For block devices, Stat().Size() returns 0. Use BLKGETSIZE64 ioctl.
+	var devSize uint64
+	_, _, errno := unix.Syscall(unix.SYS_IOCTL, f.Fd(), 0x80081272 /* BLKGETSIZE64 */, uintptr(unsafe.Pointer(&devSize)))
+	if errno != 0 {
+		return fmt.Errorf("BLKGETSIZE64: %v", errno)
+	}
+	totalPages := int64(devSize) / pageSize
+	if totalPages < 10 {
+		return fmt.Errorf("swap device too small: %d bytes", devSize)
+	}
+	lastPage := uint32(totalPages - 1)
+
+	// Write swap_header at offset 1024
+	header := make([]byte, pageSize)
+	// version = 1 (little-endian u32 at offset 0 within the header struct,
+	// which starts at byte 1024 of the page)
+	header[1024] = 1
+	header[1025] = 0
+	header[1026] = 0
+	header[1027] = 0
+	// last_page (little-endian u32)
+	header[1028] = byte(lastPage)
+	header[1029] = byte(lastPage >> 8)
+	header[1030] = byte(lastPage >> 16)
+	header[1031] = byte(lastPage >> 24)
+	// nr_badpages = 0 (already zero)
+	// uuid and volume name left as zeros
+
+	// Magic at end of first page
+	copy(header[pageSize-10:], "SWAPSPACE2")
+
+	_, err = f.WriteAt(header, 0)
+	return err
 }
 
 func mountExtraDisks(disks []diskMount) error {
