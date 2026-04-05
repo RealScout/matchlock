@@ -48,6 +48,7 @@ type VMConfig struct {
 	ExtraDisks          []DiskConfig        // Additional block devices to attach
 	SwapPath            string              // Host path to swap disk image (attached as virtio block device)
 	EncryptSwap         bool                // Use dm-crypt encryption on swap device
+	ZramPct             int                 // Percentage of RAM for zram compressed swap (0 = disabled)
 }
 
 type Backend interface {

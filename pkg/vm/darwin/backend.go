@@ -252,6 +252,10 @@ func (b *DarwinBackend) buildKernelArgs(config *vm.VMConfig) string {
 		}
 	}
 
+	if config.ZramPct > 0 {
+		diskArgs += fmt.Sprintf(" matchlock.zram_pct=%d", config.ZramPct)
+	}
+
 	addHostArgs := ""
 	for i, mapping := range config.AddHosts {
 		addHostArgs += fmt.Sprintf(" matchlock.add_host.%d=%s,%s", i, mapping.Host, mapping.IP)

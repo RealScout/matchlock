@@ -73,14 +73,22 @@ func (c *Client) Create(opts CreateOptions) (string, error) {
 		startedNetworkHookServer = true
 	}
 
+	resources := map[string]interface{}{
+		"cpus":            opts.CPUs,
+		"memory_mb":       opts.MemoryMB,
+		"disk_size_mb":    opts.DiskSizeMB,
+		"timeout_seconds": opts.TimeoutSeconds,
+	}
+	if opts.SwapSizeMB > 0 {
+		resources["swap_size_mb"] = opts.SwapSizeMB
+		resources["encrypt_swap"] = opts.EncryptSwap
+	}
+	if opts.ZramPct > 0 {
+		resources["zram_pct"] = opts.ZramPct
+	}
 	params := map[string]interface{}{
-		"image": opts.Image,
-		"resources": map[string]interface{}{
-			"cpus":            opts.CPUs,
-			"memory_mb":       opts.MemoryMB,
-			"disk_size_mb":    opts.DiskSizeMB,
-			"timeout_seconds": opts.TimeoutSeconds,
-		},
+		"image":     opts.Image,
+		"resources": resources,
 	}
 	if opts.KernelRef != "" {
 		params["kernel"] = map[string]interface{}{"ref": opts.KernelRef}

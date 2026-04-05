@@ -78,7 +78,8 @@ type bootConfig struct {
 	Disks      []diskMount
 	SwapDevice  string // e.g. "vde" — swapon /dev/vde
 	EncryptSwap bool   // use dm-crypt on swap device
-	Overlay    overlayBootConfig
+	ZramPct     int    // percentage of RAM for zram swap (0 = disabled)
+	Overlay     overlayBootConfig
 }
 
 type overlayBootConfig struct {
@@ -141,6 +142,9 @@ func runInit() {
 	}
 	if err := mountExtraDisks(cfg.Disks); err != nil {
 		fatal(err)
+	}
+	if cfg.ZramPct > 0 {
+		enableZram(cfg.ZramPct)
 	}
 	if cfg.SwapDevice != "" {
 		enableSwap(cfg.SwapDevice, cfg.EncryptSwap)
@@ -232,6 +236,13 @@ func parseBootConfig(cmdlinePath string) (*bootConfig, error) {
 		case strings.HasPrefix(field, "matchlock.encrypt_swap="):
 			v := strings.TrimPrefix(field, "matchlock.encrypt_swap=")
 			cfg.EncryptSwap = v == "1" || strings.EqualFold(v, "true")
+
+		case strings.HasPrefix(field, "matchlock.zram_pct="):
+			v := strings.TrimPrefix(field, "matchlock.zram_pct=")
+			pct, convErr := strconv.Atoi(v)
+			if convErr == nil && pct > 0 && pct <= 100 {
+				cfg.ZramPct = pct
+			}
 
 		case strings.HasPrefix(field, "matchlock.disk."):
 			spec := strings.TrimPrefix(field, "matchlock.disk.")
@@ -685,6 +696,56 @@ func interfaceHasIPv4(name string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// enableZram sets up a zram compressed swap device sized at half of total RAM.
+// zram compresses pages in memory (~2-3x ratio with LZO), so a 3GB zram device
+// on a 6GB VM can hold ~6-9GB of cold pages without any disk I/O.
+// Runs with priority 100 so the kernel prefers zram over disk swap (priority -1).
+// Silently skips if CONFIG_ZRAM is not in the kernel.
+func enableZram(pct int) {
+	// Check if zram is available in this kernel.
+	if _, err := os.Stat("/sys/class/zram-control"); err != nil {
+		return
+	}
+
+	// /dev/zram0 is auto-created when CONFIG_ZRAM=y (built-in).
+	if _, err := os.Stat("/dev/zram0"); err != nil {
+		return
+	}
+
+	// Set compression algorithm (LZO is the fastest, good for swap).
+	os.WriteFile("/sys/block/zram0/comp_algorithm", []byte("lzo\n"), 0644)
+
+	// Size zram as the requested percentage of total RAM.
+	var info unix.Sysinfo_t
+	if err := unix.Sysinfo(&info); err != nil {
+		warnf("zram: sysinfo failed: %v", err)
+		return
+	}
+	totalRAM := info.Totalram * uint64(info.Unit)
+	zramSize := totalRAM * uint64(pct) / 100
+	if err := os.WriteFile("/sys/block/zram0/disksize", []byte(fmt.Sprintf("%d\n", zramSize)), 0644); err != nil {
+		warnf("zram: set disksize: %v", err)
+		return
+	}
+
+	// Write swap header and enable.
+	if err := writeSwapHeader("/dev/zram0"); err != nil {
+		warnf("zram: write swap header: %v", err)
+		return
+	}
+
+	pathBytes, err := unix.BytePtrFromString("/dev/zram0")
+	if err != nil {
+		return
+	}
+	// SWAP_FLAG_PREFER (0x8000) | priority 100
+	const swapFlagPrefer = 0x8000
+	_, _, errno := unix.Syscall(unix.SYS_SWAPON, uintptr(unsafe.Pointer(pathBytes)), swapFlagPrefer|100, 0)
+	if errno != 0 {
+		warnf("zram: swapon failed: %v", errno)
+	}
 }
 
 func enableSwap(device string, encrypt bool) {

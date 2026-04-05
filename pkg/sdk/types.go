@@ -21,6 +21,12 @@ type CreateOptions struct {
 	MemoryMB int
 	// DiskSizeMB is the disk size in megabytes (default: 5120)
 	DiskSizeMB int
+	// SwapSizeMB is the swap disk size in megabytes (0 = disabled)
+	SwapSizeMB int
+	// EncryptSwap enables dm-crypt encryption on the swap device
+	EncryptSwap bool
+	// ZramPct is the percentage of RAM to use for zram compressed swap (0 = disabled)
+	ZramPct int
 	// TimeoutSeconds is the maximum execution time
 	TimeoutSeconds int
 	// AllowedHosts is a list of allowed network hosts (supports wildcards)

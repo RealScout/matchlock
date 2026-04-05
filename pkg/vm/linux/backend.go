@@ -344,6 +344,9 @@ func (m *LinuxMachine) generateFirecrackerConfig() []byte {
 				kernelArgs += " matchlock.encrypt_swap=1"
 			}
 		}
+		if m.config.ZramPct > 0 {
+			kernelArgs += fmt.Sprintf(" matchlock.zram_pct=%d", m.config.ZramPct)
+		}
 		for i, mapping := range m.config.AddHosts {
 			kernelArgs += fmt.Sprintf(" matchlock.add_host.%d=%s,%s", i, mapping.Host, mapping.IP)
 		}
