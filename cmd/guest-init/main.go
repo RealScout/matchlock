@@ -7,7 +7,9 @@ package main
 
 import (
 	"bufio"
+	"encoding/binary"
 	"fmt"
+	"io"
 	"math"
 	"net"
 	"os"
@@ -683,20 +685,199 @@ func interfaceHasIPv4(name string) (bool, error) {
 func enableSwap(device string) {
 	devPath := filepath.Join("/dev", device)
 
-	if err := writeSwapHeader(devPath); err != nil {
-		warnf("format swap %s: %v", devPath, err)
-		return
+	// Try encrypted swap via dm-crypt first. Falls back to unencrypted
+	// if dm-crypt is not available (kernel without CONFIG_DM_CRYPT).
+	swapDev, err := setupEncryptedSwap(devPath)
+	if err != nil {
+		warnf("encrypted swap setup failed, using unencrypted: %v", err)
+		swapDev = devPath
+		if err := writeSwapHeader(swapDev); err != nil {
+			warnf("format swap %s: %v", swapDev, err)
+			return
+		}
 	}
 
-	pathBytes, err := unix.BytePtrFromString(devPath)
+	pathBytes, err := unix.BytePtrFromString(swapDev)
 	if err != nil {
-		warnf("swapon %s: invalid path: %v", devPath, err)
+		warnf("swapon %s: invalid path: %v", swapDev, err)
 		return
 	}
 	_, _, errno := unix.Syscall(unix.SYS_SWAPON, uintptr(unsafe.Pointer(pathBytes)), 0, 0)
 	if errno != 0 {
-		warnf("swapon %s failed: %v", devPath, errno)
+		warnf("swapon %s failed: %v", swapDev, errno)
 	}
+}
+
+// setupEncryptedSwap creates a dm-crypt device on top of the raw block device
+// using a random ephemeral key. The key exists only in kernel memory and is
+// lost when the VM stops, making the on-disk swap data irrecoverable.
+//
+// Uses the device-mapper ioctl interface directly (no cryptsetup binary needed).
+// Returns the path to the dm device (e.g. /dev/dm-0).
+func setupEncryptedSwap(devPath string) (string, error) {
+	// Get the device size in 512-byte sectors.
+	f, err := os.OpenFile(devPath, os.O_RDONLY, 0)
+	if err != nil {
+		return "", err
+	}
+	var devSize uint64
+	_, _, errno := unix.Syscall(unix.SYS_IOCTL, f.Fd(), 0x80081272 /* BLKGETSIZE64 */, uintptr(unsafe.Pointer(&devSize)))
+	f.Close()
+	if errno != 0 {
+		return "", fmt.Errorf("BLKGETSIZE64: %v", errno)
+	}
+	sectors := devSize / 512
+
+	// Generate a random 256-bit key.
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(cryptoRandReader(), key); err != nil {
+		return "", fmt.Errorf("generate key: %w", err)
+	}
+	hexKey := fmt.Sprintf("%x", key)
+
+	// Open /dev/mapper/control.
+	ctrl, err := os.OpenFile("/dev/mapper/control", os.O_RDWR, 0)
+	if err != nil {
+		return "", fmt.Errorf("open /dev/mapper/control: %w", err)
+	}
+	defer ctrl.Close()
+
+	const dmName = "swap-crypt"
+
+	// DM_DEV_CREATE — create a new device.
+	dmDev, err := dmIoctl(ctrl, 0xc138fd03 /* DM_DEV_CREATE */, dmName, nil)
+	if err != nil {
+		return "", fmt.Errorf("DM_DEV_CREATE: %w", err)
+	}
+	minor := unix.Minor(dmDev)
+
+	// On failure after create, remove the dm device so the raw device isn't left busy.
+	removeDM := func() {
+		dmIoctl(ctrl, 0xc138fd04 /* DM_DEV_REMOVE */, dmName, nil)
+	}
+
+	// DM_TABLE_LOAD — load the crypt target.
+	// Target line: "0 <sectors> crypt aes-xts-plain64 <key> 0 <dev> 0"
+	targetParams := fmt.Sprintf("aes-xts-plain64 %s 0 %s 0", hexKey, devPath)
+	spec := dmTargetSpec(0, sectors, "crypt", targetParams)
+	if _, err := dmIoctl(ctrl, 0xc138fd09 /* DM_TABLE_LOAD */, dmName, spec); err != nil {
+		removeDM()
+		return "", fmt.Errorf("DM_TABLE_LOAD: %w", err)
+	}
+
+	// DM_DEV_SUSPEND (resume) — activate the device.
+	if _, err := dmIoctl(ctrl, 0xc138fd06 /* DM_DEV_SUSPEND */, dmName, nil); err != nil {
+		removeDM()
+		return "", fmt.Errorf("DM_DEV_SUSPEND: %w", err)
+	}
+
+	// The dm device is /dev/dm-<minor>. Write swap header to it.
+	mapperDev := fmt.Sprintf("/dev/dm-%d", minor)
+
+	// Wait briefly for the device node to appear.
+	for i := 0; i < 20; i++ {
+		if _, err := os.Stat(mapperDev); err == nil {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	if err := writeSwapHeader(mapperDev); err != nil {
+		removeDM()
+		return "", fmt.Errorf("write swap header on %s: %w", mapperDev, err)
+	}
+
+	return mapperDev, nil
+}
+
+func cryptoRandReader() io.Reader {
+	f, err := os.Open("/dev/urandom")
+	if err != nil {
+		// Should never happen in a Linux VM.
+		panic("open /dev/urandom: " + err.Error())
+	}
+	return f
+}
+
+// dmIoctl performs a device-mapper ioctl. The ioctl buffer layout is:
+//
+//	struct dm_ioctl {
+//	  u32 version[3];     // offset 0, 12 bytes
+//	  u32 data_size;      // offset 12
+//	  u32 data_start;     // offset 16
+//	  u32 target_count;   // offset 20
+//	  s32 open_count;     // offset 24
+//	  u32 flags;          // offset 28
+//	  u32 event_nr;       // offset 32
+//	  u32 padding;        // offset 36
+//	  u64 dev;            // offset 40
+//	  char name[128];     // offset 48
+//	  char uuid[129];     // offset 176
+//	  char data[...];     // offset 312 (DM_NAME_LEN+DM_UUID_LEN aligned)
+//	};
+//
+// Total header size: 312 bytes.
+func dmIoctl(ctrl *os.File, cmd uintptr, name string, payload []byte) (uint64, error) {
+	const headerSize = 312
+	bufSize := headerSize + len(payload)
+	if bufSize < 16384 {
+		bufSize = 16384
+	}
+	buf := make([]byte, bufSize)
+
+	// version: 4.0.0
+	buf[0] = 4
+	// data_size
+	binary.LittleEndian.PutUint32(buf[12:], uint32(bufSize))
+	// data_start (where target specs begin)
+	binary.LittleEndian.PutUint32(buf[16:], headerSize)
+	// name
+	copy(buf[48:], name)
+
+	if len(payload) > 0 {
+		copy(buf[headerSize:], payload)
+		// target_count = 1
+		binary.LittleEndian.PutUint32(buf[20:], 1)
+	}
+
+	_, _, errno := unix.Syscall(unix.SYS_IOCTL, ctrl.Fd(), cmd, uintptr(unsafe.Pointer(&buf[0])))
+	if errno != 0 {
+		return 0, errno
+	}
+
+	// Return dev field (offset 40, u64).
+	dev := binary.LittleEndian.Uint64(buf[40:])
+	return dev, nil
+}
+
+// dmTargetSpec builds a dm_target_spec + parameter string.
+//
+//	struct dm_target_spec {
+//	  u64 sector_start;   // offset 0
+//	  u64 length;         // offset 8
+//	  s32 status;         // offset 16
+//	  u32 next;           // offset 20 (offset to next spec, 0 if last)
+//	  char target_type[16]; // offset 24
+//	};
+//
+// Total: 40 bytes, followed by the null-terminated parameter string.
+func dmTargetSpec(startSector, lengthSectors uint64, targetType, params string) []byte {
+	const specSize = 40
+	paramBytes := append([]byte(params), 0) // null-terminated
+	total := specSize + len(paramBytes)
+	// Align to 8 bytes.
+	if total%8 != 0 {
+		total += 8 - (total % 8)
+	}
+	buf := make([]byte, total)
+
+	binary.LittleEndian.PutUint64(buf[0:], startSector)
+	binary.LittleEndian.PutUint64(buf[8:], lengthSectors)
+	// status = 0, next = 0 (last target)
+	copy(buf[24:], targetType)
+	copy(buf[specSize:], paramBytes)
+
+	return buf
 }
 
 // writeSwapHeader writes a minimal Linux swap header so the kernel accepts
