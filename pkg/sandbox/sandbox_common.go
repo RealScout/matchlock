@@ -144,6 +144,13 @@ func shellSingleQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
 }
 
+func zramPct(config *api.Config) int {
+	if config.Resources == nil {
+		return 0
+	}
+	return config.Resources.ZramPct
+}
+
 func flushGuestDisks(machine vm.Machine) {
 	if machine == nil {
 		return

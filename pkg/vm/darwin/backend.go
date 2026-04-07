@@ -244,6 +244,17 @@ func (b *DarwinBackend) buildKernelArgs(config *vm.VMConfig) string {
 		}
 		diskArgs += fmt.Sprintf(" matchlock.disk.%s=%s", dev, diskMount)
 	}
+	if config.SwapPath != "" {
+		diskArgs += fmt.Sprintf(" matchlock.swap=vd%c", devLetter)
+		devLetter++
+		if config.EncryptSwap {
+			diskArgs += " matchlock.encrypt_swap=1"
+		}
+	}
+
+	if config.ZramPct > 0 {
+		diskArgs += fmt.Sprintf(" matchlock.zram_pct=%d", config.ZramPct)
+	}
 
 	addHostArgs := ""
 	for i, mapping := range config.AddHosts {
@@ -354,6 +365,23 @@ func (b *DarwinBackend) configureStorage(vzConfig *vz.VirtualMachineConfiguratio
 		}
 
 		devices = append(devices, extraConfig)
+	}
+
+	if config.SwapPath != "" {
+		swapAttachment, err := vz.NewDiskImageStorageDeviceAttachmentWithCacheAndSync(
+			config.SwapPath,
+			false,
+			vz.DiskImageCachingModeAutomatic,
+			vz.DiskImageSynchronizationModeFsync,
+		)
+		if err != nil {
+			return errx.Wrap(ErrDiskAttachment, err)
+		}
+		swapConfig, err := vz.NewVirtioBlockDeviceConfiguration(swapAttachment)
+		if err != nil {
+			return errx.Wrap(ErrStorageConfig, err)
+		}
+		devices = append(devices, swapConfig)
 	}
 
 	vzConfig.SetStorageDevicesVirtualMachineConfiguration(devices)

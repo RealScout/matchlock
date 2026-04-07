@@ -49,6 +49,30 @@ func createExt4Image(path string, sizeMB int64) error {
 	return nil
 }
 
+// createSwapImage creates a sparse file to be used as a swap device.
+// The file is NOT formatted here — guest-init runs mkswap inside the VM
+// because mkswap is a Linux tool not available on macOS hosts.
+func createSwapImage(path string, sizeMB int64) error {
+	if sizeMB <= 0 {
+		return fmt.Errorf("invalid swap size %dMB", sizeMB)
+	}
+
+	f, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("create %s: %w", path, err)
+	}
+	if err := f.Truncate(sizeMB * 1024 * 1024); err != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return fmt.Errorf("truncate %s: %w", path, err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(path)
+		return fmt.Errorf("close %s: %w", path, err)
+	}
+	return nil
+}
+
 func createBootstrapRootfs(path string) error {
 	if err := createExt4Image(path, defaultBootstrapRootfsMB); err != nil {
 		return errx.Wrap(ErrPrepareBootstrapRoot, err)

@@ -7,7 +7,9 @@ package main
 
 import (
 	"bufio"
+	"encoding/binary"
 	"fmt"
+	"io"
 	"math"
 	"net"
 	"os"
@@ -74,7 +76,10 @@ type bootConfig struct {
 	MTU        int
 	NoNetwork  bool
 	Disks      []diskMount
-	Overlay    overlayBootConfig
+	SwapDevice  string // e.g. "vde" — swapon /dev/vde
+	EncryptSwap bool   // use dm-crypt on swap device
+	ZramPct     int    // percentage of RAM for zram swap (0 = disabled)
+	Overlay     overlayBootConfig
 }
 
 type overlayBootConfig struct {
@@ -137,6 +142,12 @@ func runInit() {
 	}
 	if err := mountExtraDisks(cfg.Disks); err != nil {
 		fatal(err)
+	}
+	if cfg.ZramPct > 0 {
+		enableZram(cfg.ZramPct)
+	}
+	if cfg.SwapDevice != "" {
+		enableSwap(cfg.SwapDevice, cfg.EncryptSwap)
 	}
 
 	if cfg.Workspace != "" {
@@ -215,6 +226,23 @@ func parseBootConfig(cmdlinePath string) (*bootConfig, error) {
 		case strings.HasPrefix(field, "matchlock.no_network="):
 			v := strings.TrimPrefix(field, "matchlock.no_network=")
 			cfg.NoNetwork = v == "1" || strings.EqualFold(v, "true")
+
+		case strings.HasPrefix(field, "matchlock.swap="):
+			v := strings.TrimPrefix(field, "matchlock.swap=")
+			if v != "" {
+				cfg.SwapDevice = v
+			}
+
+		case strings.HasPrefix(field, "matchlock.encrypt_swap="):
+			v := strings.TrimPrefix(field, "matchlock.encrypt_swap=")
+			cfg.EncryptSwap = v == "1" || strings.EqualFold(v, "true")
+
+		case strings.HasPrefix(field, "matchlock.zram_pct="):
+			v := strings.TrimPrefix(field, "matchlock.zram_pct=")
+			pct, convErr := strconv.Atoi(v)
+			if convErr == nil && pct > 0 && pct <= 100 {
+				cfg.ZramPct = pct
+			}
 
 		case strings.HasPrefix(field, "matchlock.disk."):
 			spec := strings.TrimPrefix(field, "matchlock.disk.")
@@ -668,6 +696,318 @@ func interfaceHasIPv4(name string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// enableZram sets up a zram compressed swap device sized at half of total RAM.
+// zram compresses pages in memory (~2-3x ratio with LZO), so a 3GB zram device
+// on a 6GB VM can hold ~6-9GB of cold pages without any disk I/O.
+// Runs with priority 100 so the kernel prefers zram over disk swap (priority -1).
+// Silently skips if CONFIG_ZRAM is not in the kernel.
+func enableZram(pct int) {
+	// Check if zram is available in this kernel.
+	if _, err := os.Stat("/sys/class/zram-control"); err != nil {
+		return
+	}
+
+	// /dev/zram0 is auto-created when CONFIG_ZRAM=y (built-in).
+	if _, err := os.Stat("/dev/zram0"); err != nil {
+		return
+	}
+
+	// Set compression algorithm (LZO is the fastest, good for swap).
+	os.WriteFile("/sys/block/zram0/comp_algorithm", []byte("lzo\n"), 0644)
+
+	// Size zram as the requested percentage of total RAM.
+	var info unix.Sysinfo_t
+	if err := unix.Sysinfo(&info); err != nil {
+		warnf("zram: sysinfo failed: %v", err)
+		return
+	}
+	totalRAM := info.Totalram * uint64(info.Unit)
+	zramSize := totalRAM * uint64(pct) / 100
+	if err := os.WriteFile("/sys/block/zram0/disksize", []byte(fmt.Sprintf("%d\n", zramSize)), 0644); err != nil {
+		warnf("zram: set disksize: %v", err)
+		return
+	}
+
+	// Write swap header and enable.
+	if err := writeSwapHeader("/dev/zram0"); err != nil {
+		warnf("zram: write swap header: %v", err)
+		return
+	}
+
+	pathBytes, err := unix.BytePtrFromString("/dev/zram0")
+	if err != nil {
+		return
+	}
+	// SWAP_FLAG_PREFER (0x8000) | priority 100
+	const swapFlagPrefer = 0x8000
+	_, _, errno := unix.Syscall(unix.SYS_SWAPON, uintptr(unsafe.Pointer(pathBytes)), swapFlagPrefer|100, 0)
+	if errno != 0 {
+		warnf("zram: swapon failed: %v", errno)
+	}
+}
+
+func enableSwap(device string, encrypt bool) {
+	devPath := filepath.Join("/dev", device)
+
+	swapDev := devPath
+	if encrypt {
+		var err error
+		swapDev, err = setupEncryptedSwap(devPath)
+		if err != nil {
+			warnf("encrypted swap setup failed, using unencrypted: %v", err)
+			swapDev = devPath
+		}
+	}
+	if swapDev == devPath {
+		if err := writeSwapHeader(swapDev); err != nil {
+			warnf("format swap %s: %v", swapDev, err)
+			return
+		}
+	}
+
+	pathBytes, err := unix.BytePtrFromString(swapDev)
+	if err != nil {
+		warnf("swapon %s: invalid path: %v", swapDev, err)
+		return
+	}
+	_, _, errno := unix.Syscall(unix.SYS_SWAPON, uintptr(unsafe.Pointer(pathBytes)), 0, 0)
+	if errno != 0 {
+		warnf("swapon %s failed: %v", swapDev, errno)
+	}
+}
+
+// setupEncryptedSwap creates a dm-crypt device on top of the raw block device
+// using a random ephemeral key. The key exists only in kernel memory and is
+// lost when the VM stops, making the on-disk swap data irrecoverable.
+//
+// Uses the device-mapper ioctl interface directly (no cryptsetup binary needed).
+// Returns the path to the dm device (e.g. /dev/dm-0).
+func setupEncryptedSwap(devPath string) (string, error) {
+	// Get the device size in 512-byte sectors.
+	f, err := os.OpenFile(devPath, os.O_RDONLY, 0)
+	if err != nil {
+		return "", err
+	}
+	var devSize uint64
+	_, _, errno := unix.Syscall(unix.SYS_IOCTL, f.Fd(), 0x80081272 /* BLKGETSIZE64 */, uintptr(unsafe.Pointer(&devSize)))
+	f.Close()
+	if errno != 0 {
+		return "", fmt.Errorf("BLKGETSIZE64: %v", errno)
+	}
+	sectors := devSize / 512
+
+	// Generate a random 256-bit key.
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(cryptoRandReader(), key); err != nil {
+		return "", fmt.Errorf("generate key: %w", err)
+	}
+	hexKey := fmt.Sprintf("%x", key)
+
+	// Open /dev/mapper/control.
+	ctrl, err := os.OpenFile("/dev/mapper/control", os.O_RDWR, 0)
+	if err != nil {
+		return "", fmt.Errorf("open /dev/mapper/control: %w", err)
+	}
+	defer ctrl.Close()
+
+	const dmName = "swap-crypt"
+
+	// DM_DEV_CREATE — create a new device.
+	dmDev, err := dmIoctl(ctrl, 0xc138fd03 /* DM_DEV_CREATE */, dmName, nil)
+	if err != nil {
+		return "", fmt.Errorf("DM_DEV_CREATE: %w", err)
+	}
+	minor := unix.Minor(dmDev)
+
+	// On failure after create, remove the dm device so the raw device isn't left busy.
+	removeDM := func() {
+		dmIoctl(ctrl, 0xc138fd04 /* DM_DEV_REMOVE */, dmName, nil)
+	}
+
+	// DM_TABLE_LOAD — load the crypt target.
+	// Target line: "0 <sectors> crypt aes-xts-plain64 <key> 0 <dev> 0"
+	targetParams := fmt.Sprintf("aes-xts-plain64 %s 0 %s 0", hexKey, devPath)
+	spec := dmTargetSpec(0, sectors, "crypt", targetParams)
+	if _, err := dmIoctl(ctrl, 0xc138fd09 /* DM_TABLE_LOAD */, dmName, spec); err != nil {
+		removeDM()
+		return "", fmt.Errorf("DM_TABLE_LOAD: %w", err)
+	}
+
+	// DM_DEV_SUSPEND (resume) — activate the device.
+	if _, err := dmIoctl(ctrl, 0xc138fd06 /* DM_DEV_SUSPEND */, dmName, nil); err != nil {
+		removeDM()
+		return "", fmt.Errorf("DM_DEV_SUSPEND: %w", err)
+	}
+
+	// The dm device is /dev/dm-<minor>. Write swap header to it.
+	mapperDev := fmt.Sprintf("/dev/dm-%d", minor)
+
+	// Wait briefly for the device node to appear.
+	for i := 0; i < 20; i++ {
+		if _, err := os.Stat(mapperDev); err == nil {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	if err := writeSwapHeader(mapperDev); err != nil {
+		removeDM()
+		return "", fmt.Errorf("write swap header on %s: %w", mapperDev, err)
+	}
+
+	return mapperDev, nil
+}
+
+func cryptoRandReader() io.Reader {
+	f, err := os.Open("/dev/urandom")
+	if err != nil {
+		// Should never happen in a Linux VM.
+		panic("open /dev/urandom: " + err.Error())
+	}
+	return f
+}
+
+// dmIoctl performs a device-mapper ioctl. The ioctl buffer layout is:
+//
+//	struct dm_ioctl {
+//	  u32 version[3];     // offset 0, 12 bytes
+//	  u32 data_size;      // offset 12
+//	  u32 data_start;     // offset 16
+//	  u32 target_count;   // offset 20
+//	  s32 open_count;     // offset 24
+//	  u32 flags;          // offset 28
+//	  u32 event_nr;       // offset 32
+//	  u32 padding;        // offset 36
+//	  u64 dev;            // offset 40
+//	  char name[128];     // offset 48
+//	  char uuid[129];     // offset 176
+//	  char data[...];     // offset 312 (DM_NAME_LEN+DM_UUID_LEN aligned)
+//	};
+//
+// Total header size: 312 bytes.
+func dmIoctl(ctrl *os.File, cmd uintptr, name string, payload []byte) (uint64, error) {
+	const headerSize = 312
+	bufSize := headerSize + len(payload)
+	if bufSize < 16384 {
+		bufSize = 16384
+	}
+	buf := make([]byte, bufSize)
+
+	// version: 4.0.0
+	buf[0] = 4
+	// data_size
+	binary.LittleEndian.PutUint32(buf[12:], uint32(bufSize))
+	// data_start (where target specs begin)
+	binary.LittleEndian.PutUint32(buf[16:], headerSize)
+	// name
+	copy(buf[48:], name)
+
+	if len(payload) > 0 {
+		copy(buf[headerSize:], payload)
+		// target_count = 1
+		binary.LittleEndian.PutUint32(buf[20:], 1)
+	}
+
+	_, _, errno := unix.Syscall(unix.SYS_IOCTL, ctrl.Fd(), cmd, uintptr(unsafe.Pointer(&buf[0])))
+	if errno != 0 {
+		return 0, errno
+	}
+
+	// Return dev field (offset 40, u64).
+	dev := binary.LittleEndian.Uint64(buf[40:])
+	return dev, nil
+}
+
+// dmTargetSpec builds a dm_target_spec + parameter string.
+//
+//	struct dm_target_spec {
+//	  u64 sector_start;   // offset 0
+//	  u64 length;         // offset 8
+//	  s32 status;         // offset 16
+//	  u32 next;           // offset 20 (offset to next spec, 0 if last)
+//	  char target_type[16]; // offset 24
+//	};
+//
+// Total: 40 bytes, followed by the null-terminated parameter string.
+func dmTargetSpec(startSector, lengthSectors uint64, targetType, params string) []byte {
+	const specSize = 40
+	paramBytes := append([]byte(params), 0) // null-terminated
+	total := specSize + len(paramBytes)
+	// Align to 8 bytes.
+	if total%8 != 0 {
+		total += 8 - (total % 8)
+	}
+	buf := make([]byte, total)
+
+	binary.LittleEndian.PutUint64(buf[0:], startSector)
+	binary.LittleEndian.PutUint64(buf[8:], lengthSectors)
+	// status = 0, next = 0 (last target)
+	copy(buf[24:], targetType)
+	copy(buf[specSize:], paramBytes)
+
+	return buf
+}
+
+// writeSwapHeader writes a minimal Linux swap header so the kernel accepts
+// the device via swapon. Layout (page size = 4096):
+//
+//	offset 1024: reserved (boot sector area)
+//	offset 4086: "SWAPSPACE2" magic (10 bytes at end of first page)
+//
+// swap_header (from include/linux/swap.h) at offset 1024:
+//
+//	u32 version  = 1
+//	u32 last_page = (device_size / page_size) - 1
+//	u32 nr_badpages = 0
+//	char uuid[16]
+//	char volume[16]
+//	u32 padding[117]
+//
+// Then the magic "SWAPSPACE2" at bytes 4086-4095 of the first page.
+func writeSwapHeader(devPath string) error {
+	const pageSize = 4096
+
+	f, err := os.OpenFile(devPath, os.O_RDWR, 0)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	// For block devices, Stat().Size() returns 0. Use BLKGETSIZE64 ioctl.
+	var devSize uint64
+	_, _, errno := unix.Syscall(unix.SYS_IOCTL, f.Fd(), 0x80081272 /* BLKGETSIZE64 */, uintptr(unsafe.Pointer(&devSize)))
+	if errno != 0 {
+		return fmt.Errorf("BLKGETSIZE64: %v", errno)
+	}
+	totalPages := int64(devSize) / pageSize
+	if totalPages < 10 {
+		return fmt.Errorf("swap device too small: %d bytes", devSize)
+	}
+	lastPage := uint32(totalPages - 1)
+
+	// Write swap_header at offset 1024
+	header := make([]byte, pageSize)
+	// version = 1 (little-endian u32 at offset 0 within the header struct,
+	// which starts at byte 1024 of the page)
+	header[1024] = 1
+	header[1025] = 0
+	header[1026] = 0
+	header[1027] = 0
+	// last_page (little-endian u32)
+	header[1028] = byte(lastPage)
+	header[1029] = byte(lastPage >> 8)
+	header[1030] = byte(lastPage >> 16)
+	header[1031] = byte(lastPage >> 24)
+	// nr_badpages = 0 (already zero)
+	// uuid and volume name left as zeros
+
+	// Magic at end of first page
+	copy(header[pageSize-10:], "SWAPSPACE2")
+
+	_, err = f.WriteAt(header, 0)
+	return err
 }
 
 func mountExtraDisks(disks []diskMount) error {

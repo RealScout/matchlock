@@ -70,6 +70,9 @@ type Resources struct {
 	CPUs           float64       `json:"cpus,omitempty"`
 	MemoryMB       int           `json:"memory_mb,omitempty"`
 	DiskSizeMB     int           `json:"disk_size_mb,omitempty"`
+	SwapSizeMB     int           `json:"swap_size_mb,omitempty"`
+	EncryptSwap    bool          `json:"encrypt_swap,omitempty"`
+	ZramPct        int           `json:"zram_pct,omitempty"`
 	TimeoutSeconds int           `json:"timeout_seconds,omitempty"`
 	Timeout        time.Duration `json:"-"`
 }
@@ -286,6 +289,15 @@ func (c *Config) Merge(other *Config) *Config {
 		}
 		if other.Resources.DiskSizeMB > 0 {
 			result.Resources.DiskSizeMB = other.Resources.DiskSizeMB
+		}
+		if other.Resources.SwapSizeMB > 0 {
+			result.Resources.SwapSizeMB = other.Resources.SwapSizeMB
+		}
+		if other.Resources.EncryptSwap {
+			result.Resources.EncryptSwap = true
+		}
+		if other.Resources.ZramPct > 0 {
+			result.Resources.ZramPct = other.Resources.ZramPct
 		}
 		if other.Resources.TimeoutSeconds > 0 {
 			result.Resources.TimeoutSeconds = other.Resources.TimeoutSeconds

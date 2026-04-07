@@ -337,6 +337,16 @@ func (m *LinuxMachine) generateFirecrackerConfig() []byte {
 			}
 			kernelArgs += fmt.Sprintf(" matchlock.disk.%s=%s", dev, diskMount)
 		}
+		if m.config.SwapPath != "" {
+			kernelArgs += fmt.Sprintf(" matchlock.swap=vd%c", devLetter)
+			devLetter++
+			if m.config.EncryptSwap {
+				kernelArgs += " matchlock.encrypt_swap=1"
+			}
+		}
+		if m.config.ZramPct > 0 {
+			kernelArgs += fmt.Sprintf(" matchlock.zram_pct=%d", m.config.ZramPct)
+		}
 		for i, mapping := range m.config.AddHosts {
 			kernelArgs += fmt.Sprintf(" matchlock.add_host.%d=%s,%s", i, mapping.Host, mapping.IP)
 		}
@@ -374,6 +384,14 @@ func (m *LinuxMachine) generateFirecrackerConfig() []byte {
 			PathOnHost:   disk.HostPath,
 			IsRootDevice: false,
 			IsReadOnly:   disk.ReadOnly,
+		})
+	}
+	if m.config.SwapPath != "" {
+		drives = append(drives, fcDrive{
+			DriveID:      "swap",
+			PathOnHost:   m.config.SwapPath,
+			IsRootDevice: false,
+			IsReadOnly:   false,
 		})
 	}
 

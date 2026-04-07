@@ -56,6 +56,19 @@ func (b *SandboxBuilder) WithDiskSize(mb int) *SandboxBuilder {
 	return b
 }
 
+// WithSwap sets swap disk size in megabytes and encryption preference.
+func (b *SandboxBuilder) WithSwap(mb int, encrypt bool) *SandboxBuilder {
+	b.opts.SwapSizeMB = mb
+	b.opts.EncryptSwap = encrypt
+	return b
+}
+
+// WithZram sets the percentage of RAM to use for zram compressed swap.
+func (b *SandboxBuilder) WithZram(pct int) *SandboxBuilder {
+	b.opts.ZramPct = pct
+	return b
+}
+
 // WithTimeout sets the maximum execution time in seconds.
 func (b *SandboxBuilder) WithTimeout(seconds int) *SandboxBuilder {
 	b.opts.TimeoutSeconds = seconds
