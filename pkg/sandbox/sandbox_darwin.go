@@ -454,6 +454,19 @@ func (s *Sandbox) AllowedHosts(ctx context.Context) ([]string, error) {
 	return s.policy.AllowedHosts(), nil
 }
 
+// ResetNetwork rebuilds the gVisor stack while keeping the underlying
+// AF_UNIX socketpair to the guest alive. Used to recover from the macOS
+// DNS-forwarder wedge described in dns-death.md.
+func (s *Sandbox) ResetNetwork(ctx context.Context) error {
+	if s.netStack == nil {
+		return errx.With(ErrNetworkResetUnavailable, ": sandbox was started without network interception")
+	}
+	if err := s.netStack.Reset(); err != nil {
+		return errx.Wrap(ErrNetworkReset, err)
+	}
+	return nil
+}
+
 func (s *Sandbox) Start(ctx context.Context) error {
 	if s.lifecycle != nil {
 		if err := s.lifecycle.SetPhase(lifecycle.PhaseStarting); err != nil {

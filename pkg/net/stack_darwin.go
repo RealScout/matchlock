@@ -5,10 +5,13 @@ package net
 import (
 	"context"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"sync"
 	"sync/atomic"
+	"syscall"
+	"time"
 
 	"github.com/jingkaihe/matchlock/pkg/api"
 	"github.com/jingkaihe/matchlock/pkg/policy"
@@ -37,6 +40,12 @@ const (
 
 	// writeBufSize is the capacity of pooled write buffers for outbound packets.
 	writeBufSize = 64 * 1024
+
+	// dnsUpstreamTimeout bounds upstream DNS queries. Without a deadline,
+	// transient host outbound-UDP failures wedge handleDNS goroutines forever
+	// and leak the upstream UDP socket FD per query, eventually exhausting
+	// the matchlock process FD limit and silently breaking DNS for every VM.
+	dnsUpstreamTimeout = 2 * time.Second
 )
 
 type NetworkStack struct {
@@ -47,6 +56,7 @@ type NetworkStack struct {
 	linkEP      *socketPairEndpoint
 	dnsServers  []string
 	dnsIndex    atomic.Uint64
+	gatewayIP   string
 	mu          sync.Mutex
 	closed      bool
 }
@@ -254,6 +264,36 @@ func (e *socketPairEndpoint) Close() {
 }
 
 func NewNetworkStack(cfg *Config) (*NetworkStack, error) {
+	file := cfg.File
+	if file == nil {
+		file = os.NewFile(uintptr(cfg.FD), "network")
+	}
+
+	// Increase socket pair buffer sizes to prevent frame drops under burst.
+	setSocketBufferSizes(file)
+
+	ns := &NetworkStack{
+		policy:     cfg.Policy,
+		events:     cfg.Events,
+		dnsServers: cfg.DNSServers,
+		gatewayIP:  cfg.GatewayIP,
+	}
+	ns.interceptor = NewHTTPInterceptor(cfg.Policy, cfg.Events, cfg.CAPool)
+
+	s, linkEP, err := ns.buildStack(file, cfg.MTU)
+	if err != nil {
+		return nil, err
+	}
+	ns.stack = s
+	ns.linkEP = linkEP
+
+	return ns, nil
+}
+
+// buildStack constructs a fresh gVisor stack attached to the given socketpair
+// FD. It is shared between NewNetworkStack and Reset so the stack-construction
+// path stays in one place.
+func (ns *NetworkStack) buildStack(file *os.File, mtu uint32) (*stack.Stack, *socketPairEndpoint, error) {
 	s := stack.New(stack.Options{
 		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol, ipv6.NewProtocol, arp.NewProtocol},
 		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol},
@@ -274,27 +314,21 @@ func NewNetworkStack(cfg *Config) (*NetworkStack, error) {
 	s.SetTransportProtocolOption(tcp.ProtocolNumber, &tcpSendBuf)
 	s.SetTransportProtocolOption(tcp.ProtocolNumber, &tcpRecvBuf)
 
-	file := cfg.File
-	if file == nil {
-		file = os.NewFile(uintptr(cfg.FD), "network")
-	}
-
-	// Increase socket pair buffer sizes to prevent frame drops under burst.
-	setSocketBufferSizes(file)
-
-	linkEP := newSocketPairEndpoint(file, cfg.MTU)
+	linkEP := newSocketPairEndpoint(file, mtu)
 
 	if tcpipErr := s.CreateNIC(1, linkEP); tcpipErr != nil {
-		return nil, fmt.Errorf("failed to create NIC: %v", tcpipErr)
+		s.Close()
+		return nil, nil, fmt.Errorf("failed to create NIC: %v", tcpipErr)
 	}
 
-	gatewayAddr := tcpip.AddrFromSlice(net.ParseIP(cfg.GatewayIP).To4())
+	gatewayAddr := tcpip.AddrFromSlice(net.ParseIP(ns.gatewayIP).To4())
 	protoAddr := tcpip.ProtocolAddress{
 		Protocol:          ipv4.ProtocolNumber,
 		AddressWithPrefix: gatewayAddr.WithPrefix(),
 	}
 	if tcpipErr := s.AddProtocolAddress(1, protoAddr, stack.AddressProperties{}); tcpipErr != nil {
-		return nil, fmt.Errorf("failed to add address: %v", tcpipErr)
+		s.Close()
+		return nil, nil, fmt.Errorf("failed to add address: %v", tcpipErr)
 	}
 
 	s.SetRouteTable([]tcpip.Route{{
@@ -305,23 +339,62 @@ func NewNetworkStack(cfg *Config) (*NetworkStack, error) {
 	s.SetPromiscuousMode(1, true)
 	s.SetSpoofing(1, true)
 
-	ns := &NetworkStack{
-		stack:      s,
-		policy:     cfg.Policy,
-		events:     cfg.Events,
-		linkEP:     linkEP,
-		dnsServers: cfg.DNSServers,
-	}
-
-	ns.interceptor = NewHTTPInterceptor(cfg.Policy, cfg.Events, cfg.CAPool)
-
 	tcpForwarder := tcp.NewForwarder(s, tcpReceiveWindowSize, 65535, ns.handleTCPConnection)
 	s.SetTransportProtocolHandler(tcp.ProtocolNumber, tcpForwarder.HandlePacket)
 
 	udpForwarder := udp.NewForwarder(s, ns.handleUDPPacket)
 	s.SetTransportProtocolHandler(udp.ProtocolNumber, udpForwarder.HandlePacket)
 
-	return ns, nil
+	return s, linkEP, nil
+}
+
+// Reset rebuilds the gVisor stack while keeping the underlying AF_UNIX
+// socketpair alive. The guest sees no NIC bounce: same MAC, same routes,
+// same kernel socket. In-flight TCP connections die (their gVisor endpoints
+// close); apps retry and recover. Wedged DNS forwarder goroutines unblock
+// when their endpoints close, releasing leaked upstream UDP socket FDs.
+//
+// This is the recovery path for VMs whose handleDNS goroutines wedged before
+// the read-deadline fix landed and exhausted the matchlock-process FD limit.
+func (ns *NetworkStack) Reset() error {
+	ns.mu.Lock()
+	defer ns.mu.Unlock()
+	if ns.closed {
+		return ErrNetworkClosed
+	}
+
+	oldLinkEP := ns.linkEP
+	oldStack := ns.stack
+	mtu := oldLinkEP.mtu
+
+	// Dup before close: a duplicate FD shares the same kernel-level open file
+	// description, so closing the original leaves the socket alive for the
+	// guest. Without this the VM's NIC would link-bounce on every reset.
+	rawFD, err := syscall.Dup(int(oldLinkEP.file.Fd()))
+	if err != nil {
+		return fmt.Errorf("dup network FD: %w", err)
+	}
+	newFile := os.NewFile(uintptr(rawFD), "network")
+
+	// Close the old gVisor stack first. This detaches the link endpoint via
+	// Attach(nil), closes UDP/TCP endpoints, and unblocks any wedged DNS
+	// forwarder goroutines waiting on guestConn reads.
+	oldStack.Close()
+
+	// Now close the old link endpoint. This closes its os.File FD, which
+	// makes the in-flight Read in its readLoop return EBADF; the goroutine
+	// then sees closed==true and exits cleanly. The underlying socket stays
+	// alive because newFile still holds a reference to it.
+	oldLinkEP.Close()
+
+	s, linkEP, err := ns.buildStack(newFile, mtu)
+	if err != nil {
+		newFile.Close()
+		return fmt.Errorf("%w: %v", ErrNetworkRebuild, err)
+	}
+	ns.stack = s
+	ns.linkEP = linkEP
+	return nil
 }
 
 func (ns *NetworkStack) handleTCPConnection(r *tcp.ForwarderRequest) {
@@ -433,21 +506,40 @@ func (ns *NetworkStack) handleDNS(r *udp.ForwarderRequest) {
 	}
 
 	if len(ns.dnsServers) == 0 {
+		log.Printf("matchlock/net: dropping DNS query, no upstream servers configured")
 		return
 	}
 	idx := ns.dnsIndex.Add(1) - 1
 	server := ns.dnsServers[idx%uint64(len(ns.dnsServers))]
 	dnsConn, err := net.Dial("udp", server+":53")
 	if err != nil {
+		// Most likely cause: process FD exhaustion (EMFILE). Surface it
+		// loudly because every subsequent guest DNS query will fail until
+		// FDs are released or the stack is reset.
+		log.Printf("matchlock/net: dial DNS upstream %s failed: %v", server, err)
 		return
 	}
 	defer dnsConn.Close()
 
-	dnsConn.Write(buf[:n])
+	// Bound write+read so a transient host-side UDP disruption can't pin this
+	// goroutine and its FD forever. Without this the daemon leaks one UDP
+	// socket per stuck query and eventually wedges DNS for every VM.
+	if err := dnsConn.SetDeadline(time.Now().Add(dnsUpstreamTimeout)); err != nil {
+		log.Printf("matchlock/net: set DNS deadline failed: %v", err)
+		return
+	}
+
+	if _, err := dnsConn.Write(buf[:n]); err != nil {
+		log.Printf("matchlock/net: write to DNS upstream %s failed: %v", server, err)
+		return
+	}
 
 	resp := make([]byte, 512)
 	respN, err := dnsConn.Read(resp)
 	if err != nil {
+		// Timeouts here are common during transient upstream disruptions
+		// (sleep/wake, VPN toggle); we just drop this query and rely on
+		// the guest resolver retrying.
 		return
 	}
 

@@ -512,6 +512,13 @@ func (s *Sandbox) AllowedHosts(ctx context.Context) ([]string, error) {
 	return s.policy.AllowedHosts(), nil
 }
 
+// ResetNetwork is a darwin-only recovery path for the gVisor DNS-forwarder
+// wedge. On linux the network stack is iptables/proxy-based and never wedges
+// in the same way, so we just report unavailable.
+func (s *Sandbox) ResetNetwork(ctx context.Context) error {
+	return errx.With(ErrNetworkResetUnavailable, ": only supported on darwin (macOS) sandboxes")
+}
+
 // Start starts the sandbox VM.
 func (s *Sandbox) Start(ctx context.Context) error {
 	if s.lifecycle != nil {

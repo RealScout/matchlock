@@ -69,6 +69,7 @@ var (
 	ErrPortForwardListen      = errors.New("start port-forward listener")
 	ErrInvalidAllowListHost   = errors.New("invalid allow-list host")
 	ErrAllowListUpdate        = errors.New("update allow-list")
+	ErrNetworkReset           = errors.New("network reset")
 	ErrResolveExecutable      = errors.New("resolve executable")
 	ErrPrepareDetachedIO      = errors.New("prepare detached stdio")
 	ErrStartDetachedRun       = errors.New("start detached run")

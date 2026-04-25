@@ -17,19 +17,21 @@ import (
 )
 
 const (
-	relayMsgExec            uint8 = 1
-	relayMsgExecResult      uint8 = 2
-	relayMsgExecInteractive uint8 = 3
-	relayMsgStdout          uint8 = 4
-	relayMsgStderr          uint8 = 5
-	relayMsgStdin           uint8 = 6
-	relayMsgExit            uint8 = 7
-	relayMsgExecPipe        uint8 = 8
-	relayMsgPortForward     uint8 = 9
-	relayMsgAllowListAdd    uint8 = 10
-	relayMsgAllowListDelete uint8 = 11
-	relayMsgAllowListResult uint8 = 12
-	relayMsgResize          uint8 = 13
+	relayMsgExec               uint8 = 1
+	relayMsgExecResult         uint8 = 2
+	relayMsgExecInteractive    uint8 = 3
+	relayMsgStdout             uint8 = 4
+	relayMsgStderr             uint8 = 5
+	relayMsgStdin              uint8 = 6
+	relayMsgExit               uint8 = 7
+	relayMsgExecPipe           uint8 = 8
+	relayMsgPortForward        uint8 = 9
+	relayMsgAllowListAdd       uint8 = 10
+	relayMsgAllowListDelete    uint8 = 11
+	relayMsgAllowListResult    uint8 = 12
+	relayMsgResize             uint8 = 13
+	relayMsgNetworkReset       uint8 = 14
+	relayMsgNetworkResetResult uint8 = 15
 )
 
 type relayExecRequest struct {
@@ -59,6 +61,10 @@ type relayAllowListResult struct {
 	Added        []string `json:"added,omitempty"`
 	Removed      []string `json:"removed,omitempty"`
 	Error        string   `json:"error,omitempty"`
+}
+
+type relayNetworkResetResult struct {
+	Error string `json:"error,omitempty"`
 }
 
 type AllowListUpdateResult struct {
@@ -144,6 +150,8 @@ func (r *ExecRelay) handleConn(conn net.Conn) {
 		r.handleAllowListAdd(conn, data)
 	case relayMsgAllowListDelete:
 		r.handleAllowListDelete(conn, data)
+	case relayMsgNetworkReset:
+		r.handleNetworkReset(conn)
 	}
 }
 
@@ -418,6 +426,14 @@ func (r *ExecRelay) handleAllowListMutation(conn net.Conn, data []byte, add bool
 	sendRelayAllowListResult(conn, result)
 }
 
+func (r *ExecRelay) handleNetworkReset(conn net.Conn) {
+	if err := r.sb.ResetNetwork(context.Background()); err != nil {
+		sendRelayNetworkResetResult(conn, &relayNetworkResetResult{Error: err.Error()})
+		return
+	}
+	sendRelayNetworkResetResult(conn, &relayNetworkResetResult{})
+}
+
 type relaySender struct {
 	conn net.Conn
 	mu   sync.Mutex
@@ -496,6 +512,11 @@ func sendRelayExit(conn net.Conn, code int) {
 func sendRelayAllowListResult(conn net.Conn, result *relayAllowListResult) {
 	data, _ := json.Marshal(result)
 	sendRelayMsg(conn, relayMsgAllowListResult, data)
+}
+
+func sendRelayNetworkResetResult(conn net.Conn, result *relayNetworkResetResult) {
+	data, _ := json.Marshal(result)
+	sendRelayMsg(conn, relayMsgNetworkResetResult, data)
 }
 
 // ExecViaRelay connects to an exec relay socket and runs a command.
@@ -717,6 +738,54 @@ func AllowListAddViaRelay(ctx context.Context, socketPath string, hosts []string
 
 func AllowListDeleteViaRelay(ctx context.Context, socketPath string, hosts []string) (*AllowListUpdateResult, error) {
 	return allowListUpdateViaRelay(ctx, socketPath, relayMsgAllowListDelete, hosts)
+}
+
+// NetworkResetViaRelay asks the matchlock daemon owning the sandbox to rebuild
+// its gVisor network stack. Used to recover VMs whose DNS forwarder has wedged
+// (see dns-death.md).
+func NetworkResetViaRelay(ctx context.Context, socketPath string) error {
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		return errx.Wrap(ErrRelayConnect, err)
+	}
+	defer conn.Close()
+
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			conn.Close()
+		case <-done:
+		}
+	}()
+
+	if err := sendRelayMsg(conn, relayMsgNetworkReset, nil); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return errx.Wrap(ErrRelaySend, err)
+	}
+
+	resultType, resultData, err := readRelayMsg(conn)
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return errx.Wrap(ErrRelayRead, err)
+	}
+	if resultType != relayMsgNetworkResetResult {
+		return errx.With(ErrRelayUnexpected, ": %d", resultType)
+	}
+
+	var result relayNetworkResetResult
+	if err := json.Unmarshal(resultData, &result); err != nil {
+		return errx.Wrap(ErrRelayDecode, err)
+	}
+	if result.Error != "" {
+		return fmt.Errorf("%s", result.Error)
+	}
+	return nil
 }
 
 func allowListUpdateViaRelay(ctx context.Context, socketPath string, msgType uint8, hosts []string) (*AllowListUpdateResult, error) {

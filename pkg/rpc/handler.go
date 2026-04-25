@@ -75,6 +75,10 @@ type interactiveExecVM interface {
 	ExecInteractive(ctx context.Context, command string, opts *api.ExecOptions, rows, cols uint16, stdin io.Reader, stdout io.Writer, resizeCh <-chan [2]uint16) (int, error)
 }
 
+type networkResetVM interface {
+	ResetNetwork(ctx context.Context) error
+}
+
 type execInputChunk struct {
 	Data []byte
 	EOF  bool
@@ -298,6 +302,8 @@ func (h *Handler) handleRequest(ctx context.Context, req *Request) *Response {
 		return h.handleAllowListDelete(ctx, req)
 	case "port_forward":
 		return h.handlePortForward(ctx, req)
+	case "network_reset":
+		return h.handleNetworkReset(ctx, req)
 	case "close":
 		return h.handleClose(ctx, req)
 	default:
@@ -1412,6 +1418,40 @@ func (h *Handler) handlePortForward(ctx context.Context, req *Request) *Response
 			"bindings": manager.Bindings(),
 		},
 		ID: req.ID,
+	}
+}
+
+func (h *Handler) handleNetworkReset(ctx context.Context, req *Request) *Response {
+	vm := h.getVM()
+	if vm == nil {
+		return &Response{
+			JSONRPC: "2.0",
+			Error:   &Error{Code: ErrCodeVMFailed, Message: "VM not created"},
+			ID:      req.ID,
+		}
+	}
+
+	resetVM, ok := vm.(networkResetVM)
+	if !ok {
+		return &Response{
+			JSONRPC: "2.0",
+			Error:   &Error{Code: ErrCodeVMFailed, Message: "VM backend does not support network reset"},
+			ID:      req.ID,
+		}
+	}
+
+	if err := resetVM.ResetNetwork(ctx); err != nil {
+		return &Response{
+			JSONRPC: "2.0",
+			Error:   &Error{Code: ErrCodeVMFailed, Message: err.Error()},
+			ID:      req.ID,
+		}
+	}
+
+	return &Response{
+		JSONRPC: "2.0",
+		Result:  map[string]interface{}{},
+		ID:      req.ID,
 	}
 }
 
