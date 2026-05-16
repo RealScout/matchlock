@@ -35,6 +35,7 @@ var (
 	ErrPrepareBootstrapRoot    = errors.New("prepare bootstrap rootfs")
 	ErrInjectCACert            = errors.New("inject CA cert into rootfs")
 	ErrInvalidDiskCfg          = errors.New("invalid extra disk config")
+	ErrInvalidMountConfig      = errors.New("invalid mount config")
 	ErrCreateVM                = errors.New("create VM")
 	ErrCreateProxy             = errors.New("create transparent proxy")
 	ErrFirewallSetup           = errors.New("setup firewall rules")

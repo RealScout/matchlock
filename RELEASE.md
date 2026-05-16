@@ -1,5 +1,14 @@
 # Release Notes
 
+## 0.2.11
+
+* Added `host_fs` mount owner overrides so files can appear with a configured UID/GID inside the VM, including CLI `-v host:guest:host_fs,uid=1000,gid=1000` support plus Go, Python, and TypeScript SDK support, contributed by [@chriszwickerergon](https://github.com/chriszwickerergon) in [#101](https://github.com/jingkaihe/matchlock/pull/101).
+
+## 0.2.10
+
+* Improved macOS interception-mode DNS reliability by bounding upstream DNS exchanges with timeouts and logging failed upstream queries instead of letting blackholed DNS requests pin goroutines.
+* Added a global `--log-level` CLI flag, configurable through `MATCHLOCK_LOG_LEVEL`, to control process-wide structured logging at `debug`, `info`, `warn`, or `error` levels.
+
 ## 0.2.9
 
 * Fixed Linux `--allow-host` DNS reachability for intercepted sandboxes by adding a host-side DNS forwarder and nftables redirection for guest DNS queries ([#94](https://github.com/jingkaihe/matchlock/issues/94), initial contribution by [@nemtsov](https://github.com/nemtsov)).

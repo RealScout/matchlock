@@ -5,7 +5,7 @@ package net
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"os"
 	"sync"
@@ -41,11 +41,11 @@ const (
 	// writeBufSize is the capacity of pooled write buffers for outbound packets.
 	writeBufSize = 64 * 1024
 
-	// dnsUpstreamTimeout bounds upstream DNS queries. Without a deadline,
+	// dnsUpstreamTimeout bounds upstream DNS exchanges. Without a deadline,
 	// transient host outbound-UDP failures wedge handleDNS goroutines forever
 	// and leak the upstream UDP socket FD per query, eventually exhausting
 	// the matchlock process FD limit and silently breaking DNS for every VM.
-	dnsUpstreamTimeout = 2 * time.Second
+	dnsUpstreamTimeout = 5 * time.Second
 )
 
 type NetworkStack struct {
@@ -506,44 +506,53 @@ func (ns *NetworkStack) handleDNS(r *udp.ForwarderRequest) {
 	}
 
 	if len(ns.dnsServers) == 0 {
-		log.Printf("matchlock/net: dropping DNS query, no upstream servers configured")
+		slog.Debug("dropping DNS query; no upstream servers configured")
 		return
 	}
 	idx := ns.dnsIndex.Add(1) - 1
 	server := ns.dnsServers[idx%uint64(len(ns.dnsServers))]
-	dnsConn, err := net.Dial("udp", server+":53")
+	resp, err := exchangeDNS(buf[:n], server, dnsUpstreamTimeout)
 	if err != nil {
-		// Most likely cause: process FD exhaustion (EMFILE). Surface it
-		// loudly because every subsequent guest DNS query will fail until
-		// FDs are released or the stack is reset.
-		log.Printf("matchlock/net: dial DNS upstream %s failed: %v", server, err)
+		slog.Debug("DNS upstream exchange failed", "server", server, "error", err)
 		return
+	}
+
+	guestConn.Write(resp)
+}
+
+func exchangeDNS(query []byte, server string, timeout time.Duration) ([]byte, error) {
+	dnsConn, err := net.DialTimeout("udp", dnsServerAddr(server), timeout)
+	if err != nil {
+		return nil, err
 	}
 	defer dnsConn.Close()
 
 	// Bound write+read so a transient host-side UDP disruption can't pin this
 	// goroutine and its FD forever. Without this the daemon leaks one UDP
 	// socket per stuck query and eventually wedges DNS for every VM.
-	if err := dnsConn.SetDeadline(time.Now().Add(dnsUpstreamTimeout)); err != nil {
-		log.Printf("matchlock/net: set DNS deadline failed: %v", err)
-		return
+	if err := dnsConn.SetDeadline(time.Now().Add(timeout)); err != nil {
+		slog.Warn("set DNS deadline failed", "server", server, "error", err)
+		return nil, err
 	}
 
-	if _, err := dnsConn.Write(buf[:n]); err != nil {
-		log.Printf("matchlock/net: write to DNS upstream %s failed: %v", server, err)
-		return
+	if _, err := dnsConn.Write(query); err != nil {
+		return nil, err
 	}
 
 	resp := make([]byte, 512)
 	respN, err := dnsConn.Read(resp)
 	if err != nil {
-		// Timeouts here are common during transient upstream disruptions
-		// (sleep/wake, VPN toggle); we just drop this query and rely on
-		// the guest resolver retrying.
-		return
+		return nil, err
 	}
 
-	guestConn.Write(resp[:respN])
+	return resp[:respN], nil
+}
+
+func dnsServerAddr(server string) string {
+	if _, _, err := net.SplitHostPort(server); err == nil {
+		return server
+	}
+	return net.JoinHostPort(server, "53")
 }
 
 func (ns *NetworkStack) emitBlockedEvent(host, reason string) {
