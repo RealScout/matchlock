@@ -5,6 +5,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -418,4 +420,103 @@ func TestIsPrivateIP(t *testing.T) {
 			assert.Equal(t, tt.private, isPrivateIP(tt.host))
 		})
 	}
+}
+
+// writeTokenFile writes a value to a temp file and returns its path. Used by
+// ValueFile tests to simulate a host refresher writing the current secret.
+func writeTokenFile(t *testing.T, dir, contents string) string {
+	t.Helper()
+	path := filepath.Join(dir, "token")
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
+	return path
+}
+
+func TestEngine_OnRequest_ValueFileSecret(t *testing.T) {
+	dir := t.TempDir()
+	tokenPath := writeTokenFile(t, dir, "fresh-token-1\n")
+
+	engine := NewEngine(&api.NetworkConfig{
+		Secrets: map[string]api.Secret{
+			"API_KEY": {
+				Placeholder: "PLACEHOLDER_TOKEN",
+				ValueFile:   tokenPath,
+				Hosts:       []string{"api.example.com"},
+			},
+		},
+	})
+
+	req := &http.Request{
+		Header: http.Header{"Authorization": []string{"Bearer PLACEHOLDER_TOKEN"}},
+		URL:    &url.URL{},
+	}
+	result, err := engine.OnRequest(req, "api.example.com")
+	require.NoError(t, err)
+	assert.Equal(t, "Bearer fresh-token-1", result.Header.Get("Authorization"),
+		"placeholder should be replaced with the file's current contents (whitespace trimmed)")
+}
+
+func TestEngine_OnRequest_ValueFileServesStaleOnReadError(t *testing.T) {
+	dir := t.TempDir()
+	tokenPath := writeTokenFile(t, dir, "first-token")
+
+	engine := NewEngine(&api.NetworkConfig{
+		Secrets: map[string]api.Secret{
+			"API_KEY": {
+				Placeholder: "PH",
+				ValueFile:   tokenPath,
+				Hosts:       []string{"api.example.com"},
+			},
+		},
+	})
+
+	// Prime the cache with a successful read.
+	req1 := &http.Request{
+		Header: http.Header{"Authorization": []string{"Bearer PH"}},
+		URL:    &url.URL{},
+	}
+	_, err := engine.OnRequest(req1, "api.example.com")
+	require.NoError(t, err)
+
+	// Force-expire the cache so the next call re-reads the file, then remove
+	// the file to simulate a transient unavailability (e.g. atomic-rename mid-flight).
+	engine.secretValMu.Lock()
+	ent := engine.secretValCache["API_KEY"]
+	ent.fetchedAt = ent.fetchedAt.Add(-2 * secretValueTTL)
+	engine.secretValCache["API_KEY"] = ent
+	engine.secretValMu.Unlock()
+	require.NoError(t, os.Remove(tokenPath))
+
+	req2 := &http.Request{
+		Header: http.Header{"Authorization": []string{"Bearer PH"}},
+		URL:    &url.URL{},
+	}
+	result, err := engine.OnRequest(req2, "api.example.com")
+	require.NoError(t, err)
+	assert.Equal(t, "Bearer first-token", result.Header.Get("Authorization"),
+		"a missing ValueFile should serve the last-known value rather than mangling the request")
+}
+
+func TestEngine_OnRequest_ValueFileMissingSkipsSwap(t *testing.T) {
+	// No cache primed and the file doesn't exist: the swap must be skipped so
+	// the placeholder passes through (caller gets a 401), not substituted with "".
+	engine := NewEngine(&api.NetworkConfig{
+		Secrets: map[string]api.Secret{
+			"API_KEY": {
+				Placeholder: "PH",
+				ValueFile:   filepath.Join(t.TempDir(), "does-not-exist"),
+				Hosts:       []string{"api.example.com"},
+			},
+		},
+	})
+
+	req := &http.Request{
+		Header: http.Header{"Authorization": []string{"Bearer PH"}},
+		URL:    &url.URL{},
+	}
+	result, err := engine.OnRequest(req, "api.example.com")
+	require.NoError(t, err)
+	assert.Equal(t, "Bearer PH", result.Header.Get("Authorization"),
+		"with no usable value the placeholder must pass through untouched")
 }

@@ -639,11 +639,12 @@ func loadSecretsFile(path string) (map[string]api.Secret, error) {
 			}
 			trimmedHosts = append(trimmedHosts, host)
 		}
-		if secret.Value == "" {
-			return nil, fmt.Errorf("secret %q must specify a value", name)
+		if secret.Value == "" && secret.ValueFile == "" {
+			return nil, fmt.Errorf("secret %q must specify either value or value_file", name)
 		}
 		secrets[name] = api.Secret{
 			Value:       secret.Value,
+			ValueFile:   strings.TrimSpace(secret.ValueFile),
 			Placeholder: strings.TrimSpace(secret.Placeholder),
 			Hosts:       trimmedHosts,
 		}

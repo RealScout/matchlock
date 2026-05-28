@@ -145,6 +145,12 @@ type Secret struct {
 	Value       string   `json:"value"`
 	Placeholder string   `json:"placeholder,omitempty"`
 	Hosts       []string `json:"hosts"`
+	// ValueFile, when set, makes the secret value dynamic: the real value is
+	// read from this host file at request time (cached briefly) instead of
+	// using the static Value. Lets a long-lived host process keep a rotating
+	// credential (e.g. a refreshing OAuth access token) fresh without
+	// relaunching the VM. The file must stay host-side — never mount it in.
+	ValueFile string `json:"value_file,omitempty"`
 }
 
 type VFSConfig struct {

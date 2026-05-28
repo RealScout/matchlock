@@ -6,11 +6,24 @@ import (
 	"encoding/hex"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/jingkaihe/matchlock/pkg/api"
 )
+
+// secretValueTTL bounds how long a ValueFile-backed secret is cached in memory
+// before being re-read. Short enough that a rotated credential is picked up
+// promptly, long enough that we don't stat/read the file on every request.
+const secretValueTTL = 60 * time.Second
+
+type secretValueEntry struct {
+	value     string
+	fetchedAt time.Time
+	ok        bool
+}
 
 type Engine struct {
 	mu           sync.RWMutex
@@ -18,6 +31,11 @@ type Engine struct {
 	placeholders map[string]string
 	networkRules []compiledNetworkRule
 	networkHook  networkHookInvoker
+
+	// secretValMu guards the ValueFile read cache. Kept separate from mu so a
+	// file read during OnRequest (which holds mu.RLock) never needs a write lock.
+	secretValMu    sync.Mutex
+	secretValCache map[string]secretValueEntry
 }
 
 func NewEngine(config *api.NetworkConfig) *Engine {
@@ -26,10 +44,11 @@ func NewEngine(config *api.NetworkConfig) *Engine {
 	}
 
 	e := &Engine{
-		config:       config,
-		placeholders: make(map[string]string),
-		networkRules: compileNetworkRules(config.Interception),
-		networkHook:  newNetworkHookInvoker(config),
+		config:         config,
+		placeholders:   make(map[string]string),
+		networkRules:   compileNetworkRules(config.Interception),
+		networkHook:    newNetworkHookInvoker(config),
+		secretValCache: make(map[string]secretValueEntry),
 	}
 
 	for name, secret := range config.Secrets {
@@ -213,7 +232,13 @@ func (e *Engine) OnRequest(req *http.Request, host string) (*http.Request, error
 			}
 			continue
 		}
-		e.replaceInRequest(req, secret.Placeholder, secret.Value)
+		if value, ok := e.resolveSecretValue(name, secret); ok {
+			e.replaceInRequest(req, secret.Placeholder, value)
+		}
+		// If the value can't be resolved (e.g. ValueFile missing and no cached
+		// value), skip the swap — the placeholder will pass through and the
+		// upstream will reject the request. Better than substituting an empty
+		// string into Authorization: Bearer.
 	}
 
 	return req, nil
@@ -265,6 +290,40 @@ func (e *Engine) requestContainsPlaceholder(req *http.Request, placeholder strin
 	}
 
 	return false
+}
+
+// resolveSecretValue returns the current real value for a secret, plus whether
+// it's usable. For a static secret (Value set, no ValueFile) it just returns
+// Value. For a dynamic secret (ValueFile set), it reads that host file with a
+// short TTL cache, serving the last-known value on read errors so a transient
+// missing/locked file doesn't immediately break in-flight requests. Returns
+// ok=false only when there's no usable value at all — callers should then skip
+// the swap rather than substitute the empty string.
+func (e *Engine) resolveSecretValue(name string, secret api.Secret) (string, bool) {
+	if secret.ValueFile == "" {
+		return secret.Value, secret.Value != ""
+	}
+
+	e.secretValMu.Lock()
+	defer e.secretValMu.Unlock()
+
+	if ent, found := e.secretValCache[name]; found && ent.ok && time.Since(ent.fetchedAt) < secretValueTTL {
+		return ent.value, true
+	}
+
+	data, err := os.ReadFile(secret.ValueFile)
+	if err != nil {
+		// Serve the last-known value rather than mangling the request when the
+		// refresher is briefly unavailable (rotating the file, transient FS error).
+		if ent, found := e.secretValCache[name]; found && ent.ok {
+			return ent.value, true
+		}
+		return "", false
+	}
+	value := strings.TrimSpace(string(data))
+	ent := secretValueEntry{value: value, fetchedAt: time.Now(), ok: value != ""}
+	e.secretValCache[name] = ent
+	return ent.value, ent.ok
 }
 
 // replaceInRequest substitutes the placeholder with the real secret in headers
