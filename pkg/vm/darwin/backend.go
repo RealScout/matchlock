@@ -246,7 +246,6 @@ func (b *DarwinBackend) buildKernelArgs(config *vm.VMConfig) string {
 	}
 	if config.SwapPath != "" {
 		diskArgs += fmt.Sprintf(" matchlock.swap=vd%c", devLetter)
-		devLetter++
 		if config.EncryptSwap {
 			diskArgs += " matchlock.encrypt_swap=1"
 		}
