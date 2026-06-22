@@ -32,6 +32,9 @@ const (
 	relayMsgResize             uint8 = 13
 	relayMsgNetworkReset       uint8 = 14
 	relayMsgNetworkResetResult uint8 = 15
+	relayMsgPathAllowSet       uint8 = 16
+	relayMsgPathAllowClear     uint8 = 17
+	relayMsgPathAllowResult    uint8 = 18
 )
 
 type relayExecRequest struct {
@@ -67,10 +70,24 @@ type relayNetworkResetResult struct {
 	Error string `json:"error,omitempty"`
 }
 
+type relayPathAllowRequest struct {
+	Host     string   `json:"host"`
+	Prefixes []string `json:"prefixes,omitempty"`
+}
+
+type relayPathAllowResult struct {
+	PathAllow map[string][]string `json:"path_allow,omitempty"`
+	Error     string              `json:"error,omitempty"`
+}
+
 type AllowListUpdateResult struct {
 	AllowedHosts []string
 	Added        []string
 	Removed      []string
+}
+
+type PathAllowUpdateResult struct {
+	PathAllow map[string][]string
 }
 
 type relayExecResult struct {
@@ -152,6 +169,10 @@ func (r *ExecRelay) handleConn(conn net.Conn) {
 		r.handleAllowListDelete(conn, data)
 	case relayMsgNetworkReset:
 		r.handleNetworkReset(conn)
+	case relayMsgPathAllowSet:
+		r.handlePathAllowSet(conn, data)
+	case relayMsgPathAllowClear:
+		r.handlePathAllowClear(conn, data)
 	}
 }
 
@@ -434,6 +455,49 @@ func (r *ExecRelay) handleNetworkReset(conn net.Conn) {
 	sendRelayNetworkResetResult(conn, &relayNetworkResetResult{})
 }
 
+func (r *ExecRelay) handlePathAllowSet(conn net.Conn, data []byte) {
+	var req relayPathAllowRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		sendRelayPathAllowResult(conn, &relayPathAllowResult{Error: err.Error()})
+		return
+	}
+	if req.Host == "" {
+		sendRelayPathAllowResult(conn, &relayPathAllowResult{Error: "host is required"})
+		return
+	}
+	if err := r.sb.SetPathAllow(context.Background(), req.Host, req.Prefixes); err != nil {
+		sendRelayPathAllowResult(conn, &relayPathAllowResult{Error: err.Error()})
+		return
+	}
+	r.sendCurrentPathAllow(conn)
+}
+
+func (r *ExecRelay) handlePathAllowClear(conn net.Conn, data []byte) {
+	var req relayPathAllowRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		sendRelayPathAllowResult(conn, &relayPathAllowResult{Error: err.Error()})
+		return
+	}
+	if req.Host == "" {
+		sendRelayPathAllowResult(conn, &relayPathAllowResult{Error: "host is required"})
+		return
+	}
+	if err := r.sb.ClearPathAllow(context.Background(), req.Host); err != nil {
+		sendRelayPathAllowResult(conn, &relayPathAllowResult{Error: err.Error()})
+		return
+	}
+	r.sendCurrentPathAllow(conn)
+}
+
+func (r *ExecRelay) sendCurrentPathAllow(conn net.Conn) {
+	pathAllow, err := r.sb.PathAllow(context.Background())
+	if err != nil {
+		sendRelayPathAllowResult(conn, &relayPathAllowResult{Error: err.Error()})
+		return
+	}
+	sendRelayPathAllowResult(conn, &relayPathAllowResult{PathAllow: pathAllow})
+}
+
 type relaySender struct {
 	conn net.Conn
 	mu   sync.Mutex
@@ -517,6 +581,11 @@ func sendRelayAllowListResult(conn net.Conn, result *relayAllowListResult) {
 func sendRelayNetworkResetResult(conn net.Conn, result *relayNetworkResetResult) {
 	data, _ := json.Marshal(result)
 	sendRelayMsg(conn, relayMsgNetworkResetResult, data)
+}
+
+func sendRelayPathAllowResult(conn net.Conn, result *relayPathAllowResult) {
+	data, _ := json.Marshal(result)
+	sendRelayMsg(conn, relayMsgPathAllowResult, data)
 }
 
 // ExecViaRelay connects to an exec relay socket and runs a command.
@@ -738,6 +807,60 @@ func AllowListAddViaRelay(ctx context.Context, socketPath string, hosts []string
 
 func AllowListDeleteViaRelay(ctx context.Context, socketPath string, hosts []string) (*AllowListUpdateResult, error) {
 	return allowListUpdateViaRelay(ctx, socketPath, relayMsgAllowListDelete, hosts)
+}
+
+func PathAllowSetViaRelay(ctx context.Context, socketPath, host string, prefixes []string) (*PathAllowUpdateResult, error) {
+	return pathAllowUpdateViaRelay(ctx, socketPath, relayMsgPathAllowSet, host, prefixes)
+}
+
+func PathAllowClearViaRelay(ctx context.Context, socketPath, host string) (*PathAllowUpdateResult, error) {
+	return pathAllowUpdateViaRelay(ctx, socketPath, relayMsgPathAllowClear, host, nil)
+}
+
+func pathAllowUpdateViaRelay(ctx context.Context, socketPath string, msgType uint8, host string, prefixes []string) (*PathAllowUpdateResult, error) {
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		return nil, errx.Wrap(ErrRelayConnect, err)
+	}
+	defer conn.Close()
+
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			conn.Close()
+		case <-done:
+		}
+	}()
+
+	reqData, _ := json.Marshal(relayPathAllowRequest{Host: host, Prefixes: prefixes})
+	if err := sendRelayMsg(conn, msgType, reqData); err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, errx.Wrap(ErrRelaySend, err)
+	}
+
+	resultType, resultData, err := readRelayMsg(conn)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, errx.Wrap(ErrRelayRead, err)
+	}
+	if resultType != relayMsgPathAllowResult {
+		return nil, errx.With(ErrRelayUnexpected, ": %d", resultType)
+	}
+
+	var result relayPathAllowResult
+	if err := json.Unmarshal(resultData, &result); err != nil {
+		return nil, errx.Wrap(ErrRelayDecode, err)
+	}
+	if result.Error != "" {
+		return nil, fmt.Errorf("%s", result.Error)
+	}
+	return &PathAllowUpdateResult{PathAllow: result.PathAllow}, nil
 }
 
 // NetworkResetViaRelay asks the matchlock daemon owning the sandbox to rebuild

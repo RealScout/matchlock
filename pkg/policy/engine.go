@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path"
 	"strings"
 	"sync"
 	"time"
@@ -215,11 +216,115 @@ func (e *Engine) IsHostAllowed(host string) bool {
 	return false
 }
 
+// pathAllowedLocked reports whether host+reqPath passes the PathAllow gate.
+// Callers must hold e.mu. A host matching a PathAllow key is default-deny: the
+// path must be one of the configured prefixes (or equal to a prefix sans its
+// trailing slash). Hosts matching no key are always allowed.
+func (e *Engine) pathAllowedLocked(host, reqPath string) bool {
+	if len(e.config.PathAllow) == 0 {
+		return true
+	}
+	// Normalize before prefix-matching: collapse "." / ".." and duplicate slashes
+	// so a crafted path can't slip an allowed prefix past the check and then
+	// resolve elsewhere upstream — e.g. "/repos/RealScout/../rails" or its
+	// %2f-encoded form, which reach req.URL.Path already decoded.
+	if reqPath == "" {
+		reqPath = "/"
+	}
+	reqPath = path.Clean(reqPath)
+	restricted := false
+	for pattern, prefixes := range e.config.PathAllow {
+		if !matchGlob(pattern, host) {
+			continue
+		}
+		restricted = true
+		for _, p := range prefixes {
+			if reqPath == strings.TrimRight(p, "/") || strings.HasPrefix(reqPath, p) {
+				return true
+			}
+		}
+	}
+	return !restricted
+}
+
+// SetPathAllow installs (replacing any existing) the allowed path prefixes for a
+// host on the live engine. Empty prefixes clears the host's restriction. Returns
+// the cleaned prefixes that are now in effect.
+func (e *Engine) SetPathAllow(host string, prefixes []string) []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if e.config == nil {
+		e.config = &api.NetworkConfig{}
+	}
+	host = strings.TrimSpace(host)
+
+	cleaned := make([]string, 0, len(prefixes))
+	seen := make(map[string]struct{}, len(prefixes))
+	for _, p := range prefixes {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if _, ok := seen[p]; ok {
+			continue
+		}
+		seen[p] = struct{}{}
+		cleaned = append(cleaned, p)
+	}
+
+	if len(cleaned) == 0 {
+		delete(e.config.PathAllow, host)
+		return nil
+	}
+	if e.config.PathAllow == nil {
+		e.config.PathAllow = make(map[string][]string)
+	}
+	e.config.PathAllow[host] = cleaned
+	return cleaned
+}
+
+// ClearPathAllow removes a host's path restriction on the live engine, returning
+// true if one was present.
+func (e *Engine) ClearPathAllow(host string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	host = strings.TrimSpace(host)
+	if e.config == nil || e.config.PathAllow == nil {
+		return false
+	}
+	if _, ok := e.config.PathAllow[host]; !ok {
+		return false
+	}
+	delete(e.config.PathAllow, host)
+	return true
+}
+
+// PathAllow returns a copy of the current per-host path restrictions.
+func (e *Engine) PathAllow() map[string][]string {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	if e.config == nil || len(e.config.PathAllow) == 0 {
+		return nil
+	}
+	out := make(map[string][]string, len(e.config.PathAllow))
+	for k, v := range e.config.PathAllow {
+		out[k] = append([]string(nil), v...)
+	}
+	return out
+}
+
 func (e *Engine) OnRequest(req *http.Request, host string) (*http.Request, error) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
 	host = strings.Split(host, ":")[0]
+
+	if req != nil && req.URL != nil && !e.pathAllowedLocked(host, req.URL.Path) {
+		return nil, api.ErrBlocked
+	}
 
 	if err := e.applyBeforeNetworkRules(req, host); err != nil {
 		return nil, err

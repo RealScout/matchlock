@@ -120,6 +120,7 @@ func init() {
 	runCmd.Flags().Int("mtu", api.DefaultNetworkMTU, "Network MTU for guest interface")
 	runCmd.Flags().Bool("no-network", false, "Create sandbox with no network interfaces")
 	runCmd.Flags().Bool("network-intercept", false, "Force network interception proxy/stack even when allow-list and secrets are empty")
+	runCmd.Flags().StringArray("allow-path", nil, "Restrict a host to URL path prefixes (HOST:/prefix, repeatable). Requests to HOST whose path lacks an allowed prefix are blocked. Forces interception.")
 	runCmd.Flags().StringArrayP("publish", "p", nil, "Publish a host port to a sandbox port ([LOCAL_PORT:]REMOTE_PORT)")
 	runCmd.Flags().StringSlice("address", []string{"127.0.0.1"}, "Address to bind published ports on the host (can be repeated)")
 	runCmd.Flags().Float64("cpus", float64(api.DefaultCPUs), "Number of CPUs (supports fractional values, e.g. 0.5)")
@@ -157,6 +158,7 @@ func init() {
 	viper.BindPFlag("run.mtu", runCmd.Flags().Lookup("mtu"))
 	viper.BindPFlag("run.no-network", runCmd.Flags().Lookup("no-network"))
 	viper.BindPFlag("run.network-intercept", runCmd.Flags().Lookup("network-intercept"))
+	viper.BindPFlag("run.allow-path", runCmd.Flags().Lookup("allow-path"))
 	viper.BindPFlag("run.publish", runCmd.Flags().Lookup("publish"))
 	viper.BindPFlag("run.address", runCmd.Flags().Lookup("address"))
 	viper.BindPFlag("run.cpus", runCmd.Flags().Lookup("cpus"))
@@ -225,6 +227,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 	networkMTU, _ := cmd.Flags().GetInt("mtu")
 	noNetwork, _ := cmd.Flags().GetBool("no-network")
 	networkIntercept, _ := cmd.Flags().GetBool("network-intercept")
+	allowPathSpecs, _ := cmd.Flags().GetStringArray("allow-path")
 	publishSpecs, _ := cmd.Flags().GetStringArray("publish")
 	addresses, _ := cmd.Flags().GetStringSlice("address")
 
@@ -249,6 +252,14 @@ func runRun(cmd *cobra.Command, args []string) error {
 		if networkIntercept {
 			return fmt.Errorf("--no-network cannot be combined with --network-intercept")
 		}
+		if len(allowPathSpecs) > 0 {
+			return fmt.Errorf("--no-network cannot be combined with --allow-path")
+		}
+	}
+
+	pathAllow, err := parseAllowPaths(allowPathSpecs)
+	if err != nil {
+		return err
 	}
 
 	// Shutdown
@@ -418,7 +429,8 @@ func runRun(cmd *cobra.Command, args []string) error {
 			AddHosts:        addHosts,
 			BlockPrivateIPs: true,
 			NoNetwork:       noNetwork,
-			Intercept:       networkIntercept,
+			Intercept:       networkIntercept || len(pathAllow) > 0,
+			PathAllow:       pathAllow,
 			Secrets:         parsedSecrets,
 			DNSServers:      dnsServers,
 			Hostname:        hostname,
@@ -565,6 +577,33 @@ func runRun(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// parseAllowPaths turns "HOST:/prefix" specs into the per-host prefix map for
+// NetworkConfig.PathAllow. The split is on the first colon, so prefixes may not
+// contain one (URL paths don't).
+func parseAllowPaths(specs []string) (map[string][]string, error) {
+	if len(specs) == 0 {
+		return nil, nil
+	}
+	out := make(map[string][]string)
+	for _, spec := range specs {
+		spec = strings.TrimSpace(spec)
+		if spec == "" {
+			continue
+		}
+		host, prefix, ok := strings.Cut(spec, ":")
+		host = strings.TrimSpace(host)
+		prefix = strings.TrimSpace(prefix)
+		if !ok || host == "" || prefix == "" {
+			return nil, fmt.Errorf("--allow-path must be HOST:/prefix, got %q", spec)
+		}
+		out[host] = append(out[host], prefix)
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return out, nil
 }
 
 func parseRunSecrets(secretSpecs, placeholderSpecs []string, secretFile string) (map[string]api.Secret, error) {

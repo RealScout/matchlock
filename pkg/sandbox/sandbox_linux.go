@@ -523,6 +523,35 @@ func (s *Sandbox) AllowedHosts(ctx context.Context) ([]string, error) {
 	return s.policy.AllowedHosts(), nil
 }
 
+func (s *Sandbox) SetPathAllow(ctx context.Context, host string, prefixes []string) error {
+	if s.proxy == nil {
+		return errx.With(ErrAllowListUnavailable, ": sandbox was started without network interception")
+	}
+	if host == "" {
+		return errx.With(ErrAllowListHosts, ": no host provided")
+	}
+	s.policy.SetPathAllow(host, prefixes)
+	return nil
+}
+
+func (s *Sandbox) ClearPathAllow(ctx context.Context, host string) error {
+	if s.proxy == nil {
+		return errx.With(ErrAllowListUnavailable, ": sandbox was started without network interception")
+	}
+	if host == "" {
+		return errx.With(ErrAllowListHosts, ": no host provided")
+	}
+	s.policy.ClearPathAllow(host)
+	return nil
+}
+
+func (s *Sandbox) PathAllow(ctx context.Context) (map[string][]string, error) {
+	if s.proxy == nil {
+		return nil, errx.With(ErrAllowListUnavailable, ": sandbox was started without network interception")
+	}
+	return s.policy.PathAllow(), nil
+}
+
 // ResetNetwork is a darwin-only recovery path for the gVisor DNS-forwarder
 // wedge. On linux the network stack is iptables/proxy-based and never wedges
 // in the same way, so we just report unavailable.

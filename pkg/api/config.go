@@ -93,10 +93,16 @@ type NetworkConfig struct {
 	Intercept       bool                       `json:"intercept,omitempty"`
 	Interception    *NetworkInterceptionConfig `json:"interception,omitempty"`
 	Secrets         map[string]Secret          `json:"secrets,omitempty"`
-	PolicyScript    string                     `json:"policy_script,omitempty"`
-	DNSServers      []string                   `json:"dns_servers,omitempty"`
-	Hostname        string                     `json:"hostname,omitempty"`
-	MTU             int                        `json:"mtu,omitempty"`
+	// PathAllow gates a host down to specific URL path prefixes: keyed by host
+	// glob, each value is a list of allowed path prefixes. A request whose host
+	// matches a key but whose path has none of the prefixes is blocked; hosts not
+	// matching any key are unaffected. Requires interception — the path is only
+	// visible once the proxy terminates TLS.
+	PathAllow    map[string][]string `json:"path_allow,omitempty"`
+	PolicyScript string              `json:"policy_script,omitempty"`
+	DNSServers   []string            `json:"dns_servers,omitempty"`
+	Hostname     string              `json:"hostname,omitempty"`
+	MTU          int                 `json:"mtu,omitempty"`
 }
 
 // GetDNSServers returns the configured DNS servers or defaults.
@@ -137,6 +143,9 @@ func (n *NetworkConfig) Validate() error {
 	}
 	if n.Interception != nil {
 		return errx.With(ErrInvalidConfig, ": network.no_network cannot be combined with network.interception")
+	}
+	if len(n.PathAllow) > 0 {
+		return errx.With(ErrInvalidConfig, ": network.no_network cannot be combined with network.path_allow")
 	}
 	return nil
 }

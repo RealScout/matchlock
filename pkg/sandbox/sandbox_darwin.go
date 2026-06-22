@@ -462,6 +462,35 @@ func (s *Sandbox) AllowedHosts(ctx context.Context) ([]string, error) {
 	return s.policy.AllowedHosts(), nil
 }
 
+func (s *Sandbox) SetPathAllow(ctx context.Context, host string, prefixes []string) error {
+	if s.netStack == nil {
+		return errx.With(ErrAllowListUnavailable, ": sandbox was started without network interception")
+	}
+	if host == "" {
+		return errx.With(ErrAllowListHosts, ": no host provided")
+	}
+	s.policy.SetPathAllow(host, prefixes)
+	return nil
+}
+
+func (s *Sandbox) ClearPathAllow(ctx context.Context, host string) error {
+	if s.netStack == nil {
+		return errx.With(ErrAllowListUnavailable, ": sandbox was started without network interception")
+	}
+	if host == "" {
+		return errx.With(ErrAllowListHosts, ": no host provided")
+	}
+	s.policy.ClearPathAllow(host)
+	return nil
+}
+
+func (s *Sandbox) PathAllow(ctx context.Context) (map[string][]string, error) {
+	if s.netStack == nil {
+		return nil, errx.With(ErrAllowListUnavailable, ": sandbox was started without network interception")
+	}
+	return s.policy.PathAllow(), nil
+}
+
 // ResetNetwork rebuilds the gVisor stack while keeping the underlying
 // AF_UNIX socketpair to the guest alive. Used to recover from the macOS
 // DNS-forwarder wedge described in dns-death.md.

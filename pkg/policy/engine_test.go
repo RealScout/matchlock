@@ -520,3 +520,54 @@ func TestEngine_OnRequest_ValueFileMissingSkipsSwap(t *testing.T) {
 	assert.Equal(t, "Bearer PH", result.Header.Get("Authorization"),
 		"with no usable value the placeholder must pass through untouched")
 }
+
+func TestEngine_OnRequest_PathAllow(t *testing.T) {
+	engine := NewEngine(&api.NetworkConfig{
+		PathAllow: map[string][]string{
+			"api.github.com": {"/repos/RealScout/", "/orgs/RealScout/"},
+		},
+	})
+
+	onReq := func(host, path string) error {
+		_, err := engine.OnRequest(&http.Request{URL: &url.URL{Path: path}}, host)
+		return err
+	}
+
+	// Restricted host: only the allowed prefixes (and their subtrees) pass.
+	require.NoError(t, onReq("api.github.com", "/repos/RealScout/RealScoutV2/pulls/1/reviews"))
+	require.NoError(t, onReq("api.github.com", "/orgs/RealScout/repos"))
+
+	// Restricted host: everything else is blocked — other orgs, graphql, search,
+	// a look-alike owner prefix, and path-traversal escapes that prefix-match the
+	// allowed prefix but resolve outside our org.
+	for _, p := range []string{
+		"/repos/rails/rails", "/graphql", "/search/issues", "/repos/RealScoutEvil/x",
+		"/repos/RealScout/../rails/rails", "/repos/RealScout/../../rails", "/repos/RealScout/..",
+	} {
+		assert.ErrorIs(t, onReq("api.github.com", p), api.ErrBlocked, "path %q must be blocked", p)
+	}
+
+	// A host with no PathAllow entry is unaffected.
+	require.NoError(t, onReq("api.example.com", "/anything/at/all"))
+}
+
+func TestEngine_SetAndClearPathAllow(t *testing.T) {
+	engine := NewEngine(&api.NetworkConfig{})
+
+	onReq := func(host, path string) error {
+		_, err := engine.OnRequest(&http.Request{URL: &url.URL{Path: path}}, host)
+		return err
+	}
+
+	// No restriction yet — anything goes.
+	require.NoError(t, onReq("api.github.com", "/repos/rails/rails"))
+
+	engine.SetPathAllow("api.github.com", []string{"/repos/RealScout/"})
+	require.NoError(t, onReq("api.github.com", "/repos/RealScout/RealScoutV2"))
+	assert.ErrorIs(t, onReq("api.github.com", "/repos/rails/rails"), api.ErrBlocked)
+
+	require.True(t, engine.ClearPathAllow("api.github.com"))
+	require.NoError(t, onReq("api.github.com", "/repos/rails/rails"),
+		"clearing the restriction reopens the host")
+	assert.False(t, engine.ClearPathAllow("api.github.com"), "second clear is a no-op")
+}
