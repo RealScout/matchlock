@@ -68,14 +68,14 @@ type hostIPMapping struct {
 }
 
 type bootConfig struct {
-	DNSServers []string
-	Hostname   string
-	AddHosts   []hostIPMapping
-	Workspace  string
-	CPUs       float64
-	MTU        int
-	NoNetwork  bool
-	Disks      []diskMount
+	DNSServers  []string
+	Hostname    string
+	AddHosts    []hostIPMapping
+	Workspace   string
+	CPUs        float64
+	MTU         int
+	NoNetwork   bool
+	Disks       []diskMount
 	SwapDevice  string // e.g. "vde" — swapon /dev/vde
 	EncryptSwap bool   // use dm-crypt on swap device
 	ZramPct     int    // percentage of RAM for zram swap (0 = disabled)
