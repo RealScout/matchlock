@@ -178,5 +178,9 @@ func processRunning(pid int) bool {
 	if err != nil {
 		return false
 	}
-	return p.Signal(syscall.Signal(0)) == nil
+	if p.Signal(syscall.Signal(0)) != nil {
+		return false
+	}
+	// Reject zombies — Signal(0) alone reports a defunct supervisor as alive.
+	return !state.IsProcessZombie(pid)
 }

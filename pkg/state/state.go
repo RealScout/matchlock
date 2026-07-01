@@ -5,7 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -290,7 +294,48 @@ func (m *Manager) isProcessRunning(pid int) bool {
 	if err != nil {
 		return false
 	}
-	return process.Signal(syscall.Signal(0)) == nil
+	if process.Signal(syscall.Signal(0)) != nil {
+		return false
+	}
+	// Signal(0) succeeds for a zombie/defunct process (the PID isn't reaped yet),
+	// so a VM supervisor that crashed and reparented to launchd would otherwise
+	// read as running forever — the source of the "zombie VM" false positive.
+	return !IsProcessZombie(pid)
+}
+
+// IsProcessZombie reports whether pid exists but is a zombie/defunct (or, on
+// darwin, an actively-exiting) process. Signal(0) reports these as alive, so a
+// liveness check must reject them explicitly. Best-effort: any lookup failure
+// returns false (treat as not-a-zombie) rather than masking a live process.
+func IsProcessZombie(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	if runtime.GOOS == "linux" {
+		data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+		if err != nil {
+			return false
+		}
+		// Format: `pid (comm) state ...`. comm can contain spaces and parens, so
+		// the state field is the first token after the final ')'.
+		s := string(data)
+		if i := strings.LastIndex(s, ")"); i >= 0 {
+			rest := strings.Fields(s[i+1:])
+			return len(rest) > 0 && rest[0] == "Z"
+		}
+		return false
+	}
+	// darwin/BSD: read the ps STAT code. First rune is the state (Z = zombie);
+	// macOS additionally flags a wedged, exiting process with 'E' in the STAT.
+	out, err := exec.Command("ps", "-o", "stat=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return false
+	}
+	st := strings.TrimSpace(string(out))
+	if st == "" {
+		return false
+	}
+	return st[0] == 'Z' || strings.ContainsRune(st, 'E')
 }
 
 func (m *Manager) LogPath(id string) string {
