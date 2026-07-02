@@ -15,6 +15,9 @@ type Provider interface {
 	Create(path string, mode os.FileMode) (Handle, error)
 	Mkdir(path string, mode os.FileMode) error
 	Chmod(path string, mode os.FileMode) error
+	// Chtimes sets access and modification times. A zero time.Time leaves
+	// the corresponding timestamp unchanged.
+	Chtimes(path string, atime, mtime time.Time) error
 	Remove(path string) error
 	RemoveAll(path string) error
 	Rename(oldPath, newPath string) error

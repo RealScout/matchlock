@@ -196,6 +196,23 @@ func (p *MemoryProvider) Chmod(path string, mode os.FileMode) error {
 	return nil
 }
 
+func (p *MemoryProvider) Chtimes(path string, atime, mtime time.Time) error {
+	path = p.normPath(path)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if f, ok := p.files[path]; ok {
+		if !mtime.IsZero() {
+			f.modTime = mtime
+		}
+		return nil
+	}
+	if _, ok := p.dirs[path]; ok {
+		return nil
+	}
+	return syscall.ENOENT
+}
+
 func (p *MemoryProvider) Remove(path string) error {
 	path = p.normPath(path)
 	p.mu.Lock()

@@ -242,6 +242,14 @@ func (r *MountRouter) Chmod(path string, mode os.FileMode) error {
 	return p.Chmod(rel, mode)
 }
 
+func (r *MountRouter) Chtimes(path string, atime, mtime time.Time) error {
+	p, rel, err := r.resolve(path)
+	if err != nil {
+		return err
+	}
+	return p.Chtimes(rel, atime, mtime)
+}
+
 func (r *MountRouter) Remove(path string) error {
 	p, rel, err := r.resolve(path)
 	if err != nil {

@@ -52,6 +52,7 @@ const (
 	OpReadlink
 	OpLink
 	OpFsyncPath
+	OpChtimes
 )
 
 type VFSRequest struct {
@@ -66,6 +67,8 @@ type VFSRequest struct {
 	Mode    uint32 `cbor:"mode,omitempty"`
 	UID     uint32 `cbor:"uid,omitempty"`
 	GID     uint32 `cbor:"gid,omitempty"`
+	AtimeNS *int64 `cbor:"atime_ns,omitempty"`
+	MtimeNS *int64 `cbor:"mtime_ns,omitempty"`
 }
 
 type VFSResponse struct {
@@ -406,6 +409,28 @@ func (n *VFSNode) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAtt
 	// Handle chmod
 	if mode, ok := in.GetMode(); ok {
 		resp, err := n.client.RequestCtx(ctx, &VFSRequest{Op: OpSetattr, Path: n.path, Mode: mode})
+		if err != nil {
+			return syscall.EIO
+		}
+		if resp.Err != 0 {
+			return syscall.Errno(-resp.Err)
+		}
+	}
+
+	// Handle utimens
+	atime, aok := in.GetATime()
+	mtime, mok := in.GetMTime()
+	if aok || mok {
+		req := &VFSRequest{Op: OpChtimes, Path: n.path}
+		if aok {
+			ns := atime.UnixNano()
+			req.AtimeNS = &ns
+		}
+		if mok {
+			ns := mtime.UnixNano()
+			req.MtimeNS = &ns
+		}
+		resp, err := n.client.RequestCtx(ctx, req)
 		if err != nil {
 			return syscall.EIO
 		}

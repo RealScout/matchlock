@@ -3,6 +3,7 @@ package vfs
 import (
 	"os"
 	"path/filepath"
+	"time"
 )
 
 type RealFSProvider struct {
@@ -100,6 +101,10 @@ func (p *RealFSProvider) Mkdir(path string, mode os.FileMode) error {
 
 func (p *RealFSProvider) Chmod(path string, mode os.FileMode) error {
 	return os.Chmod(p.realPath(path), mode)
+}
+
+func (p *RealFSProvider) Chtimes(path string, atime, mtime time.Time) error {
+	return os.Chtimes(p.realPath(path), atime, mtime)
 }
 
 func (p *RealFSProvider) Remove(path string) error {

@@ -3,6 +3,7 @@ package vfs
 import (
 	"os"
 	"syscall"
+	"time"
 )
 
 type interceptProvider struct {
@@ -130,6 +131,16 @@ func (p *interceptProvider) Chmod(path string, mode os.FileMode) error {
 		return err
 	}
 	err := p.inner.Chmod(req.Path, req.Mode)
+	p.hooks.After(req, HookResult{Err: err})
+	return err
+}
+
+func (p *interceptProvider) Chtimes(path string, atime, mtime time.Time) error {
+	req := p.baseRequest(HookOpChtimes, path)
+	if err := p.hooks.Before(&req); err != nil {
+		return err
+	}
+	err := p.inner.Chtimes(req.Path, atime, mtime)
 	p.hooks.After(req, HookResult{Err: err})
 	return err
 }

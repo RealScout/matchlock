@@ -19,6 +19,7 @@ const (
 	HookOpCreate    HookOp = "create"
 	HookOpMkdir     HookOp = "mkdir"
 	HookOpChmod     HookOp = "chmod"
+	HookOpChtimes   HookOp = "chtimes"
 	HookOpRemove    HookOp = "remove"
 	HookOpRemoveAll HookOp = "remove_all"
 	HookOpRename    HookOp = "rename"

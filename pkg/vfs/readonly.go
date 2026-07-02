@@ -3,6 +3,7 @@ package vfs
 import (
 	"os"
 	"syscall"
+	"time"
 )
 
 type ReadonlyProvider struct {
@@ -33,6 +34,9 @@ func (p *ReadonlyProvider) Create(path string, mode os.FileMode) (Handle, error)
 }
 
 func (p *ReadonlyProvider) Chmod(path string, mode os.FileMode) error { return syscall.EROFS }
+func (p *ReadonlyProvider) Chtimes(path string, atime, mtime time.Time) error {
+	return syscall.EROFS
+}
 func (p *ReadonlyProvider) Mkdir(path string, mode os.FileMode) error { return syscall.EROFS }
 func (p *ReadonlyProvider) Remove(path string) error                  { return syscall.EROFS }
 func (p *ReadonlyProvider) RemoveAll(path string) error               { return syscall.EROFS }

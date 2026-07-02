@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
 
 	"github.com/fxamacker/cbor/v2"
 )
@@ -37,6 +38,7 @@ const (
 	OpReadlink
 	OpLink
 	OpFsyncPath
+	OpChtimes
 )
 
 type VFSRequest struct {
@@ -51,6 +53,8 @@ type VFSRequest struct {
 	Mode    uint32 `cbor:"mode,omitempty"`
 	UID     uint32 `cbor:"uid,omitempty"`
 	GID     uint32 `cbor:"gid,omitempty"`
+	AtimeNS *int64 `cbor:"atime_ns,omitempty"`
+	MtimeNS *int64 `cbor:"mtime_ns,omitempty"`
 }
 
 type VFSResponse struct {
@@ -287,6 +291,19 @@ func (s *VFSServer) dispatch(req *VFSRequest) *VFSResponse {
 	case OpFsync:
 		if hi, ok := s.handles.Load(req.Handle); ok {
 			hi.(Handle).Sync()
+		}
+		return &VFSResponse{}
+
+	case OpChtimes:
+		var atime, mtime time.Time
+		if req.AtimeNS != nil {
+			atime = time.Unix(0, *req.AtimeNS)
+		}
+		if req.MtimeNS != nil {
+			mtime = time.Unix(0, *req.MtimeNS)
+		}
+		if err := provider.Chtimes(req.Path, atime, mtime); err != nil {
+			return &VFSResponse{Err: errnoFromError(err)}
 		}
 		return &VFSResponse{}
 
