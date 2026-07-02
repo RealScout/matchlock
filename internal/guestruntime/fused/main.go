@@ -416,27 +416,16 @@ func (n *VFSNode) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAtt
 
 	// Handle truncate
 	if sz, ok := in.GetSize(); ok {
-		resp, err := n.client.RequestCtx(ctx, &VFSRequest{Op: OpOpen, Path: n.path, Flags: uint32(os.O_RDWR)})
+		req := &VFSRequest{Op: OpTruncate, Path: n.path, Offset: int64(sz)}
+		if h, ok := fh.(*VFSFileHandle); ok && h != nil {
+			req.Handle = h.handle
+		}
+		resp, err := n.client.RequestCtx(ctx, req)
 		if err != nil {
 			return syscall.EIO
 		}
 		if resp.Err != 0 {
 			return syscall.Errno(-resp.Err)
-		}
-		handle := resp.Handle
-
-		if sz == 0 {
-			n.client.RequestCtx(ctx, &VFSRequest{Op: OpRelease, Handle: handle})
-			resp, err = n.client.RequestCtx(ctx, &VFSRequest{Op: OpCreate, Path: n.path, Mode: 0644})
-			if err != nil {
-				return syscall.EIO
-			}
-			if resp.Err != 0 {
-				return syscall.Errno(-resp.Err)
-			}
-			n.client.RequestCtx(ctx, &VFSRequest{Op: OpRelease, Handle: resp.Handle})
-		} else {
-			n.client.RequestCtx(ctx, &VFSRequest{Op: OpRelease, Handle: handle})
 		}
 	}
 

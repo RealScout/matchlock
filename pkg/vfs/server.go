@@ -212,6 +212,27 @@ func (s *VFSServer) dispatch(req *VFSRequest) *VFSResponse {
 		}
 		return &VFSResponse{Written: uint32(n)}
 
+	case OpTruncate:
+		if req.Handle != 0 {
+			hi, ok := s.handles.Load(req.Handle)
+			if !ok {
+				return &VFSResponse{Err: -int32(syscall.EBADF)}
+			}
+			if err := hi.(Handle).Truncate(req.Offset); err != nil {
+				return &VFSResponse{Err: errnoFromError(err)}
+			}
+			return &VFSResponse{}
+		}
+		h, err := provider.Open(req.Path, os.O_WRONLY, 0)
+		if err != nil {
+			return &VFSResponse{Err: errnoFromError(err)}
+		}
+		defer h.Close()
+		if err := h.Truncate(req.Offset); err != nil {
+			return &VFSResponse{Err: errnoFromError(err)}
+		}
+		return &VFSResponse{}
+
 	case OpRelease:
 		if hi, ok := s.handles.LoadAndDelete(req.Handle); ok {
 			hi.(Handle).Close()
