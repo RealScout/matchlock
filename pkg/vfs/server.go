@@ -165,7 +165,7 @@ func (s *VFSServer) dispatch(req *VFSRequest) *VFSResponse {
 		return &VFSResponse{Stat: statFromInfo(req.Path, info)}
 
 	case OpOpen:
-		h, err := provider.Open(req.Path, int(req.Flags), os.FileMode(req.Mode))
+		h, err := provider.Open(req.Path, hostOpenFlags(req.Flags), os.FileMode(req.Mode))
 		if err != nil {
 			return &VFSResponse{Err: errnoFromError(err)}
 		}
