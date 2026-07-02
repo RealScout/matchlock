@@ -124,7 +124,12 @@ func (p *MemoryProvider) Open(path string, flags int, mode os.FileMode) (Handle,
 
 	if flags&os.O_CREATE != 0 {
 		p.mu.Lock()
-		if _, exists := p.files[path]; !exists {
+		if _, exists := p.files[path]; exists {
+			if flags&os.O_EXCL != 0 {
+				p.mu.Unlock()
+				return nil, syscall.EEXIST
+			}
+		} else {
 			dir := filepath.Dir(path)
 			if _, ok := p.dirs[dir]; !ok {
 				p.mu.Unlock()

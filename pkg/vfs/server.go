@@ -178,7 +178,15 @@ func (s *VFSServer) dispatch(req *VFSRequest) *VFSResponse {
 		return &VFSResponse{Handle: fh}
 
 	case OpCreate:
-		h, err := provider.Create(req.Path, os.FileMode(req.Mode))
+		var h Handle
+		var err error
+		if req.Flags != 0 {
+			h, err = provider.Open(req.Path, hostOpenFlags(req.Flags)|os.O_CREATE, os.FileMode(req.Mode))
+		} else {
+			// Legacy guests omit create flags; preserve the historical
+			// create-and-truncate behavior for them.
+			h, err = provider.Create(req.Path, os.FileMode(req.Mode))
+		}
 		if err != nil {
 			return &VFSResponse{Err: errnoFromError(err)}
 		}
