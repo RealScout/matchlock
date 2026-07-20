@@ -46,7 +46,12 @@ type Config struct {
 	Env              map[string]string `json:"env,omitempty"`
 	ExtraDisks       []DiskMount       `json:"extra_disks,omitempty"`
 	VirtioFS         []VirtioFSMount   `json:"virtiofs,omitempty"`
-	ImageCfg         *ImageConfig      `json:"image_config,omitempty"`
+	// VirtioFSMask lists absolute guest paths that guest-init bind-mounts
+	// /dev/null over immediately after mounting the virtio-fs shares — the
+	// share bypasses VFS-level mount overrides, and per-exec mount
+	// namespaces mean a post-boot exec cannot apply a persistent mask.
+	VirtioFSMask []string     `json:"virtiofs_mask,omitempty"`
+	ImageCfg     *ImageConfig `json:"image_config,omitempty"`
 }
 
 // DiskMount describes a persistent ext4 disk image to attach as a block device.
@@ -359,6 +364,9 @@ func (c *Config) Merge(other *Config) *Config {
 	}
 	if len(other.VirtioFS) > 0 {
 		result.VirtioFS = other.VirtioFS
+	}
+	if len(other.VirtioFSMask) > 0 {
+		result.VirtioFSMask = other.VirtioFSMask
 	}
 	if other.ImageCfg != nil {
 		result.ImageCfg = other.ImageCfg

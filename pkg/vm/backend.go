@@ -62,6 +62,7 @@ type VMConfig struct {
 	EncryptSwap         bool                // Use dm-crypt encryption on swap device
 	ZramPct             int                 // Percentage of RAM for zram compressed swap (0 = disabled)
 	VirtioFSShares      []VirtioFSShare     // virtio-fs directory shares (darwin backend only)
+	VirtioFSMaskPaths   []string            // guest paths guest-init masks with /dev/null after shares mount
 }
 
 type Backend interface {

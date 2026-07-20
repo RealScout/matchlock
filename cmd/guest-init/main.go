@@ -74,19 +74,20 @@ type virtioFSMount struct {
 }
 
 type bootConfig struct {
-	DNSServers  []string
-	Hostname    string
-	AddHosts    []hostIPMapping
-	Workspace   string
-	CPUs        float64
-	MTU         int
-	NoNetwork   bool
-	Disks       []diskMount
-	SwapDevice  string // e.g. "vde" — swapon /dev/vde
-	EncryptSwap bool   // use dm-crypt on swap device
-	ZramPct     int    // percentage of RAM for zram swap (0 = disabled)
-	Overlay     overlayBootConfig
-	VirtioFS    []virtioFSMount
+	DNSServers   []string
+	Hostname     string
+	AddHosts     []hostIPMapping
+	Workspace    string
+	CPUs         float64
+	MTU          int
+	NoNetwork    bool
+	Disks        []diskMount
+	SwapDevice   string // e.g. "vde" — swapon /dev/vde
+	EncryptSwap  bool   // use dm-crypt on swap device
+	ZramPct      int    // percentage of RAM for zram swap (0 = disabled)
+	Overlay      overlayBootConfig
+	VirtioFS     []virtioFSMount
+	VirtioFSMask []string
 }
 
 type overlayBootConfig struct {
@@ -174,6 +175,13 @@ func runInit() {
 		fatal(err)
 	}
 
+	// Masks must be applied HERE, in init's namespace: the shares bypass the
+	// VFS-level mount overrides, and exec sessions get private mount
+	// namespaces, so a post-boot exec cannot mask anything persistently.
+	if err := maskVirtioFSPaths(cfg.VirtioFSMask); err != nil {
+		fatal(err)
+	}
+
 	if err := unix.Exec(guestAgentPath, []string{guestAgentPath}, os.Environ()); err != nil {
 		fatal(errx.With(ErrExecGuestAgent, ": %w", err))
 	}
@@ -190,6 +198,18 @@ func mountVirtioFS(mounts []virtioFSMount) error {
 		}
 		if err := unix.Mount(m.Tag, m.Path, "virtiofs", flags, ""); err != nil {
 			return errx.With(ErrMountVirtioFS, ": virtiofs %s -> %s: %w", m.Tag, m.Path, err)
+		}
+	}
+	return nil
+}
+
+func maskVirtioFSPaths(paths []string) error {
+	for _, p := range paths {
+		if _, err := os.Stat(p); err != nil {
+			continue // an absent file exposes nothing
+		}
+		if err := unix.Mount("/dev/null", p, "", unix.MS_BIND, ""); err != nil {
+			return errx.With(ErrMountVirtioFS, ": mask %s: %w", p, err)
 		}
 	}
 	return nil
@@ -297,6 +317,14 @@ func parseBootConfig(cmdlinePath string) (*bootConfig, error) {
 				return nil, parseErr
 			}
 			cfg.VirtioFS = append(cfg.VirtioFS, virtioFSMount{Tag: spec[:i], Path: mountPath, ReadOnly: readonly})
+
+		case strings.HasPrefix(field, "matchlock.virtiofs_mask="):
+			spec := strings.TrimPrefix(field, "matchlock.virtiofs_mask=")
+			for _, p := range strings.Split(spec, ",") {
+				if p = strings.TrimSpace(p); p != "" {
+					cfg.VirtioFSMask = append(cfg.VirtioFSMask, p)
+				}
+			}
 
 		case strings.HasPrefix(field, "matchlock.overlay="):
 			v := strings.TrimPrefix(field, "matchlock.overlay=")

@@ -268,6 +268,7 @@ func New(ctx context.Context, config *api.Config, opts *Options) (sb *Sandbox, r
 		PrebuiltRootfs:      bootstrapRootfsPath,
 		ExtraDisks:          extraDisks,
 		VirtioFSShares:      virtioFSShares,
+		VirtioFSMaskPaths:   config.VirtioFSMask,
 		SwapPath:            swapPath,
 		EncryptSwap:         config.Resources != nil && config.Resources.EncryptSwap,
 		ZramPct:             zramPct(config),

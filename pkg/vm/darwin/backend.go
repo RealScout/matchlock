@@ -257,6 +257,9 @@ func (b *DarwinBackend) buildKernelArgs(config *vm.VMConfig) string {
 		}
 		diskArgs += fmt.Sprintf(" matchlock.virtiofs.%s=%s", share.Tag, mount)
 	}
+	if len(config.VirtioFSMaskPaths) > 0 {
+		diskArgs += " matchlock.virtiofs_mask=" + strings.Join(config.VirtioFSMaskPaths, ",")
+	}
 
 	if config.ZramPct > 0 {
 		diskArgs += fmt.Sprintf(" matchlock.zram_pct=%d", config.ZramPct)

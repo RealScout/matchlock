@@ -111,6 +111,7 @@ func init() {
 	runCmd.Flags().StringArrayP("volume", "v", nil, fmt.Sprintf("Volume mount, repeatable (host:guest = overlay snapshot by default; use :%s for direct rw host mount, :%s for read-only host mount; host_fs supports uid/gid owner options)", api.MountTypeHostFS, api.MountOptionReadonlyShort))
 	runCmd.Flags().StringSlice("disk", nil, "Attach raw ext4 disk image (host_path:guest_mount[:ro] or @volume_name:guest_mount[:ro])")
 	runCmd.Flags().StringSlice("virtiofs", nil, "Share host directory via virtio-fs (host_dir:guest_mount[:ro]; macOS only, may shadow a VFS subtree)")
+	runCmd.Flags().StringSlice("virtiofs-mask", nil, "Absolute guest path to bind /dev/null over after virtio-fs shares mount (repeatable; masks files the share would otherwise expose)")
 	runCmd.Flags().StringArrayP("env", "e", nil, "Environment variable (KEY=VALUE or KEY; can be repeated)")
 	runCmd.Flags().StringArray("env-file", nil, "Environment file (KEY=VALUE or KEY per line; can be repeated)")
 	runCmd.Flags().StringArray("secret", nil, "Secret (NAME=VALUE@host1,host2 or NAME@host1,host2)")
@@ -151,6 +152,7 @@ func init() {
 	viper.BindPFlag("run.volume", runCmd.Flags().Lookup("volume"))
 	viper.BindPFlag("run.disk", runCmd.Flags().Lookup("disk"))
 	viper.BindPFlag("run.virtiofs", runCmd.Flags().Lookup("virtiofs"))
+	viper.BindPFlag("run.virtiofs-mask", runCmd.Flags().Lookup("virtiofs-mask"))
 	viper.BindPFlag("run.env", runCmd.Flags().Lookup("env"))
 	viper.BindPFlag("run.env-file", runCmd.Flags().Lookup("env-file"))
 	viper.BindPFlag("run.secret", runCmd.Flags().Lookup("secret"))
@@ -220,6 +222,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 	volumes, _ := cmd.Flags().GetStringArray("volume")
 	diskMountSpecs, _ := cmd.Flags().GetStringSlice("disk")
 	virtioFSSpecs, _ := cmd.Flags().GetStringSlice("virtiofs")
+	virtioFSMask, _ := cmd.Flags().GetStringSlice("virtiofs-mask")
 	envVars, _ := cmd.Flags().GetStringArray("env")
 	envFiles, _ := cmd.Flags().GetStringArray("env-file")
 	secrets, _ := cmd.Flags().GetStringArray("secret")
@@ -451,11 +454,12 @@ func runRun(cmd *cobra.Command, args []string) error {
 			Hostname:        hostname,
 			MTU:             networkMTU,
 		},
-		VFS:        vfsConfig,
-		Env:        parsedEnv,
-		ExtraDisks: extraDisks,
-		VirtioFS:   virtioFSMounts,
-		ImageCfg:   imageCfg,
+		VFS:          vfsConfig,
+		Env:          parsedEnv,
+		ExtraDisks:   extraDisks,
+		VirtioFS:     virtioFSMounts,
+		VirtioFSMask: virtioFSMask,
+		ImageCfg:     imageCfg,
 	}
 	if err := config.Network.Validate(); err != nil {
 		return err
