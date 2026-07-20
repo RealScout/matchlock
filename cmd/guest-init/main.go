@@ -67,6 +67,12 @@ type hostIPMapping struct {
 	IP   string
 }
 
+type virtioFSMount struct {
+	Tag      string
+	Path     string
+	ReadOnly bool
+}
+
 type bootConfig struct {
 	DNSServers  []string
 	Hostname    string
@@ -80,6 +86,7 @@ type bootConfig struct {
 	EncryptSwap bool   // use dm-crypt on swap device
 	ZramPct     int    // percentage of RAM for zram swap (0 = disabled)
 	Overlay     overlayBootConfig
+	VirtioFS    []virtioFSMount
 }
 
 type overlayBootConfig struct {
@@ -160,9 +167,32 @@ func runInit() {
 		}
 	}
 
+	// After the VFS workspace is up, so a share mounted inside it shadows that
+	// subtree. Fatal on failure: a silent fall-through would leave the FUSE
+	// tree serving a path the host was told is virtio-fs.
+	if err := mountVirtioFS(cfg.VirtioFS); err != nil {
+		fatal(err)
+	}
+
 	if err := unix.Exec(guestAgentPath, []string{guestAgentPath}, os.Environ()); err != nil {
 		fatal(errx.With(ErrExecGuestAgent, ": %w", err))
 	}
+}
+
+func mountVirtioFS(mounts []virtioFSMount) error {
+	for _, m := range mounts {
+		if err := os.MkdirAll(m.Path, 0o755); err != nil {
+			return errx.With(ErrMountVirtioFS, ": virtiofs %s: mkdir %s: %w", m.Tag, m.Path, err)
+		}
+		var flags uintptr
+		if m.ReadOnly {
+			flags = unix.MS_RDONLY
+		}
+		if err := unix.Mount(m.Tag, m.Path, "virtiofs", flags, ""); err != nil {
+			return errx.With(ErrMountVirtioFS, ": virtiofs %s -> %s: %w", m.Tag, m.Path, err)
+		}
+	}
+	return nil
 }
 
 func fatal(err error) {
@@ -255,6 +285,18 @@ func parseBootConfig(cmdlinePath string) (*bootConfig, error) {
 				return nil, parseErr
 			}
 			cfg.Disks = append(cfg.Disks, diskMount{Device: spec[:i], Path: mountPath, ReadOnly: readonly})
+
+		case strings.HasPrefix(field, "matchlock.virtiofs."):
+			spec := strings.TrimPrefix(field, "matchlock.virtiofs.")
+			i := strings.IndexByte(spec, '=')
+			if i <= 0 || i == len(spec)-1 {
+				continue
+			}
+			mountPath, readonly, parseErr := parseDiskMountSpec(spec[i+1:])
+			if parseErr != nil {
+				return nil, parseErr
+			}
+			cfg.VirtioFS = append(cfg.VirtioFS, virtioFSMount{Tag: spec[:i], Path: mountPath, ReadOnly: readonly})
 
 		case strings.HasPrefix(field, "matchlock.overlay="):
 			v := strings.TrimPrefix(field, "matchlock.overlay=")

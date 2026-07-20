@@ -110,6 +110,7 @@ func init() {
 	runCmd.Flags().StringSlice("add-host", nil, "Add a custom host-to-IP mapping (host:ip, can be repeated)")
 	runCmd.Flags().StringArrayP("volume", "v", nil, fmt.Sprintf("Volume mount, repeatable (host:guest = overlay snapshot by default; use :%s for direct rw host mount, :%s for read-only host mount; host_fs supports uid/gid owner options)", api.MountTypeHostFS, api.MountOptionReadonlyShort))
 	runCmd.Flags().StringSlice("disk", nil, "Attach raw ext4 disk image (host_path:guest_mount[:ro] or @volume_name:guest_mount[:ro])")
+	runCmd.Flags().StringSlice("virtiofs", nil, "Share host directory via virtio-fs (host_dir:guest_mount[:ro]; macOS only, may shadow a VFS subtree)")
 	runCmd.Flags().StringArrayP("env", "e", nil, "Environment variable (KEY=VALUE or KEY; can be repeated)")
 	runCmd.Flags().StringArray("env-file", nil, "Environment file (KEY=VALUE or KEY per line; can be repeated)")
 	runCmd.Flags().StringArray("secret", nil, "Secret (NAME=VALUE@host1,host2 or NAME@host1,host2)")
@@ -149,6 +150,7 @@ func init() {
 	viper.BindPFlag("run.add-host", runCmd.Flags().Lookup("add-host"))
 	viper.BindPFlag("run.volume", runCmd.Flags().Lookup("volume"))
 	viper.BindPFlag("run.disk", runCmd.Flags().Lookup("disk"))
+	viper.BindPFlag("run.virtiofs", runCmd.Flags().Lookup("virtiofs"))
 	viper.BindPFlag("run.env", runCmd.Flags().Lookup("env"))
 	viper.BindPFlag("run.env-file", runCmd.Flags().Lookup("env-file"))
 	viper.BindPFlag("run.secret", runCmd.Flags().Lookup("secret"))
@@ -217,6 +219,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 	addHostSpecs, _ := cmd.Flags().GetStringSlice("add-host")
 	volumes, _ := cmd.Flags().GetStringArray("volume")
 	diskMountSpecs, _ := cmd.Flags().GetStringSlice("disk")
+	virtioFSSpecs, _ := cmd.Flags().GetStringSlice("virtiofs")
 	envVars, _ := cmd.Flags().GetStringArray("env")
 	envFiles, _ := cmd.Flags().GetStringArray("env-file")
 	secrets, _ := cmd.Flags().GetStringArray("secret")
@@ -385,6 +388,18 @@ func runRun(cmd *cobra.Command, args []string) error {
 		extraDisks = append(extraDisks, diskMount)
 	}
 
+	// virtio-fs shares mount AFTER the VFS workspace in guest-init, so unlike
+	// --disk a guest mount inside the workspace is legal — it shadows that
+	// subtree, which is the point.
+	virtioFSMounts := make([]api.VirtioFSMount, 0, len(virtioFSSpecs))
+	for _, spec := range virtioFSSpecs {
+		m, err := parseVirtioFSMountSpec(spec)
+		if err != nil {
+			return errx.With(ErrInvalidDiskMount, " %q: %w", spec, err)
+		}
+		virtioFSMounts = append(virtioFSMounts, m)
+	}
+
 	parsedSecrets, err := parseRunSecrets(secrets, secretPlaceholders, secretFile)
 	if err != nil {
 		return err
@@ -439,6 +454,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 		VFS:        vfsConfig,
 		Env:        parsedEnv,
 		ExtraDisks: extraDisks,
+		VirtioFS:   virtioFSMounts,
 		ImageCfg:   imageCfg,
 	}
 	if err := config.Network.Validate(); err != nil {
@@ -827,6 +843,43 @@ func runInteractive(ctx context.Context, sb *sandbox.Sandbox, command, workdir s
 
 func openVMLogAppender(path string) (*os.File, error) {
 	return os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+}
+
+func parseVirtioFSMountSpec(spec string) (api.VirtioFSMount, error) {
+	parts := strings.Split(spec, ":")
+	if len(parts) < 2 || len(parts) > 3 {
+		return api.VirtioFSMount{}, fmt.Errorf("expected format host_dir:guest_mount[:ro]")
+	}
+	hostPath := strings.TrimSpace(parts[0])
+	guestMount := strings.TrimSpace(parts[1])
+	if hostPath == "" || guestMount == "" {
+		return api.VirtioFSMount{}, fmt.Errorf("host_dir and guest_mount are required")
+	}
+	if !filepath.IsAbs(hostPath) {
+		abs, err := filepath.Abs(hostPath)
+		if err != nil {
+			return api.VirtioFSMount{}, err
+		}
+		hostPath = abs
+	}
+	info, err := os.Stat(hostPath)
+	if err != nil {
+		return api.VirtioFSMount{}, fmt.Errorf("host dir does not exist: %s", hostPath)
+	}
+	if !info.IsDir() {
+		return api.VirtioFSMount{}, fmt.Errorf("host path is not a directory: %s", hostPath)
+	}
+	if err := api.ValidateGuestMount(guestMount); err != nil {
+		return api.VirtioFSMount{}, err
+	}
+	readonly := false
+	if len(parts) == 3 {
+		if strings.TrimSpace(parts[2]) != "ro" {
+			return api.VirtioFSMount{}, fmt.Errorf("invalid option %q: only 'ro' is supported", parts[2])
+		}
+		readonly = true
+	}
+	return api.VirtioFSMount{HostPath: hostPath, GuestMount: guestMount, ReadOnly: readonly}, nil
 }
 
 func parseDiskMountSpec(spec string) (api.DiskMount, error) {

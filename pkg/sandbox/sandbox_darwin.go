@@ -237,6 +237,16 @@ func New(ctx context.Context, config *api.Config, opts *Options) (sb *Sandbox, r
 		subnetCIDR = subnetInfo.GatewayIP + "/24"
 	}
 
+	virtioFSShares := make([]vm.VirtioFSShare, 0, len(config.VirtioFS))
+	for i, m := range config.VirtioFS {
+		virtioFSShares = append(virtioFSShares, vm.VirtioFSShare{
+			Tag:        fmt.Sprintf("mlfs%d", i),
+			HostPath:   m.HostPath,
+			GuestMount: m.GuestMount,
+			ReadOnly:   m.ReadOnly,
+		})
+	}
+
 	vmConfig := &vm.VMConfig{
 		ID:                  id,
 		KernelPath:          kernelPath,
@@ -257,6 +267,7 @@ func New(ctx context.Context, config *api.Config, opts *Options) (sb *Sandbox, r
 		Privileged:          config.Privileged,
 		PrebuiltRootfs:      bootstrapRootfsPath,
 		ExtraDisks:          extraDisks,
+		VirtioFSShares:      virtioFSShares,
 		SwapPath:            swapPath,
 		EncryptSwap:         config.Resources != nil && config.Resources.EncryptSwap,
 		ZramPct:             zramPct(config),

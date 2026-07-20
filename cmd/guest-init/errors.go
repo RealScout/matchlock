@@ -12,6 +12,7 @@ var (
 	ErrInvalidAddHost     = errors.New("invalid matchlock.add_host")
 	ErrInvalidDiskMount   = errors.New("invalid matchlock.disk")
 	ErrMountExtraDisk     = errors.New("mount extra disk")
+	ErrMountVirtioFS      = errors.New("mount virtiofs share")
 	ErrInvalidOverlayCfg  = errors.New("invalid overlay root config")
 	ErrOverlaySetup       = errors.New("setup overlay root")
 	ErrWriteHostname      = errors.New("write hostname")

@@ -16,6 +16,18 @@ type DiskConfig struct {
 	ReadOnly   bool
 }
 
+// VirtioFSShare exports a host directory into the guest as a virtio-fs
+// device (VZ directory sharing; darwin backend only). The guest mounts it by
+// Tag at GuestMount — mounting over a path inside the VFS workspace shadows
+// that subtree, which is how a share can replace the FUSE mount for one
+// directory while the VFS keeps serving the rest.
+type VirtioFSShare struct {
+	Tag        string // virtio-fs mount tag the guest passes to mount(2)
+	HostPath   string // Host directory to share
+	GuestMount string // Mount point inside the guest
+	ReadOnly   bool
+}
+
 type VMConfig struct {
 	ID                  string
 	KernelPath          string
@@ -49,6 +61,7 @@ type VMConfig struct {
 	SwapPath            string              // Host path to swap disk image (attached as virtio block device)
 	EncryptSwap         bool                // Use dm-crypt encryption on swap device
 	ZramPct             int                 // Percentage of RAM for zram compressed swap (0 = disabled)
+	VirtioFSShares      []VirtioFSShare     // virtio-fs directory shares (darwin backend only)
 }
 
 type Backend interface {

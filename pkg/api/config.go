@@ -45,11 +45,22 @@ type Config struct {
 	VFS              *VFSConfig        `json:"vfs,omitempty"`
 	Env              map[string]string `json:"env,omitempty"`
 	ExtraDisks       []DiskMount       `json:"extra_disks,omitempty"`
+	VirtioFS         []VirtioFSMount   `json:"virtiofs,omitempty"`
 	ImageCfg         *ImageConfig      `json:"image_config,omitempty"`
 }
 
 // DiskMount describes a persistent ext4 disk image to attach as a block device.
 type DiskMount struct {
+	HostPath   string `json:"host_path"`
+	GuestMount string `json:"guest_mount"`
+	ReadOnly   bool   `json:"readonly,omitempty"`
+}
+
+// VirtioFSMount shares a host directory into the guest via a virtio-fs
+// device (VZ directory sharing; darwin only). Unlike VFS mounts the guest
+// kernel talks to the share directly — mounting inside the workspace shadows
+// that subtree of the VFS.
+type VirtioFSMount struct {
 	HostPath   string `json:"host_path"`
 	GuestMount string `json:"guest_mount"`
 	ReadOnly   bool   `json:"readonly,omitempty"`
@@ -345,6 +356,9 @@ func (c *Config) Merge(other *Config) *Config {
 	}
 	if len(other.ExtraDisks) > 0 {
 		result.ExtraDisks = other.ExtraDisks
+	}
+	if len(other.VirtioFS) > 0 {
+		result.VirtioFS = other.VirtioFS
 	}
 	if other.ImageCfg != nil {
 		result.ImageCfg = other.ImageCfg

@@ -250,6 +250,13 @@ func (b *DarwinBackend) buildKernelArgs(config *vm.VMConfig) string {
 			diskArgs += " matchlock.encrypt_swap=1"
 		}
 	}
+	for _, share := range config.VirtioFSShares {
+		mount := share.GuestMount
+		if share.ReadOnly {
+			mount += ",ro"
+		}
+		diskArgs += fmt.Sprintf(" matchlock.virtiofs.%s=%s", share.Tag, mount)
+	}
 
 	if config.ZramPct > 0 {
 		diskArgs += fmt.Sprintf(" matchlock.zram_pct=%d", config.ZramPct)
@@ -384,6 +391,27 @@ func (b *DarwinBackend) configureStorage(vzConfig *vz.VirtualMachineConfiguratio
 	}
 
 	vzConfig.SetStorageDevicesVirtualMachineConfiguration(devices)
+
+	if len(config.VirtioFSShares) > 0 {
+		var fsDevices []vz.DirectorySharingDeviceConfiguration
+		for _, share := range config.VirtioFSShares {
+			sharedDir, err := vz.NewSharedDirectory(share.HostPath, share.ReadOnly)
+			if err != nil {
+				return errx.With(ErrStorageConfig, ": virtiofs %s: %w", share.Tag, err)
+			}
+			dirShare, err := vz.NewSingleDirectoryShare(sharedDir)
+			if err != nil {
+				return errx.With(ErrStorageConfig, ": virtiofs %s: %w", share.Tag, err)
+			}
+			fsDevice, err := vz.NewVirtioFileSystemDeviceConfiguration(share.Tag)
+			if err != nil {
+				return errx.With(ErrStorageConfig, ": virtiofs %s: %w", share.Tag, err)
+			}
+			fsDevice.SetDirectoryShare(dirShare)
+			fsDevices = append(fsDevices, fsDevice)
+		}
+		vzConfig.SetDirectorySharingDevicesVirtualMachineConfiguration(fsDevices)
+	}
 	return nil
 }
 
