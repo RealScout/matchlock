@@ -1,0 +1,34 @@
+# Options that olddefconfig already drops from the configs on 6.19.8, from
+# before verify-config.sh existed — so the kernels we ship today are already
+# built without them. Listed here to keep the build moving while still failing
+# on any NEW drift.
+#
+# These have NOT been triaged. Two different things are mixed together:
+#   - Options that no longer exist on this arch/version (EXT4_FS_XATTR was
+#     folded into ext4; EARLY_PRINTK is largely x86) — harmless.
+#   - Options with genuinely unmet dependencies. The netfilter entries are
+#     this kind, and Docker NAT depends on them.
+# Shrinking this list is the actual fix; every line is a known gap.
+#
+# One entry has already been triaged off this list: CONFIG_CGROUP_V1 was a
+# symbol that does not exist in 6.19 (the legacy hierarchies split into
+# per-controller MEMCG_V1/CPUSETS_V1), so it read as authoritative while
+# silently doing nothing. Expect others here to be the same kind of phantom —
+# check the symbol exists for this version before assuming it is a real gap.
+
+CONFIG_IP_NF_FILTER
+CONFIG_IP_NF_MANGLE
+CONFIG_IP_NF_RAW
+CONFIG_IP_NF_NAT
+CONFIG_IP_NF_TARGET_MASQUERADE
+CONFIG_IP_NF_TARGET_REDIRECT
+CONFIG_IP6_NF_FILTER
+CONFIG_IP6_NF_MANGLE
+CONFIG_IP6_NF_RAW
+CONFIG_IP6_NF_NAT
+CONFIG_IP6_NF_TARGET_MASQUERADE
+CONFIG_EXT4_FS_XATTR
+CONFIG_EARLY_PRINTK
+CONFIG_ARCH_VIRT
+CONFIG_HYPERVISOR_GUEST
+CONFIG_BLK_MQ_VIRTIO

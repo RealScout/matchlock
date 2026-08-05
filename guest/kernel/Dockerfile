@@ -44,10 +44,14 @@ RUN set -eux; \
 # ---------------------------------------------------------------------------
 FROM base AS build-x86_64
 
-COPY x86_64.config /tmp/linux-src/.config
+COPY x86_64.config /tmp/requested.config
+COPY verify-config.sh /usr/local/bin/verify-config.sh
+COPY known-drift.txt /tmp/known-drift.txt
 
 RUN cd /tmp/linux-src \
+    && cp /tmp/requested.config .config \
     && make olddefconfig \
+    && sh /usr/local/bin/verify-config.sh /tmp/requested.config .config /tmp/known-drift.txt \
     && make -j"$(nproc)" vmlinux
 
 # ---------------------------------------------------------------------------
@@ -55,10 +59,14 @@ RUN cd /tmp/linux-src \
 # ---------------------------------------------------------------------------
 FROM base AS build-arm64
 
-COPY arm64.config /tmp/linux-src/.config
+COPY arm64.config /tmp/requested.config
+COPY verify-config.sh /usr/local/bin/verify-config.sh
+COPY known-drift.txt /tmp/known-drift.txt
 
 RUN cd /tmp/linux-src \
+    && cp /tmp/requested.config .config \
     && make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig \
+    && sh /usr/local/bin/verify-config.sh /tmp/requested.config .config /tmp/known-drift.txt \
     && make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j"$(nproc)" Image
 
 # ---------------------------------------------------------------------------
