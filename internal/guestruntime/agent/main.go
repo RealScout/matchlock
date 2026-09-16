@@ -292,9 +292,16 @@ func handlePortForward(fd int, data []byte) {
 		syscall.Close(fd)
 		return
 	}
-	defer target.Close()
 
 	sendMessage(fd, MsgTypeReady, nil)
+	bridgePortForward(fd, target)
+}
+
+// bridgePortForward shuttles bytes between the vsock fd and target until either
+// side finishes, then tears both down. It owns fd and target.
+func bridgePortForward(fd int, target net.Conn) {
+	defer syscall.Close(fd)
+	defer target.Close()
 
 	done := make(chan struct{}, 2)
 	go func() {
@@ -309,9 +316,16 @@ func handlePortForward(fd int, data []byte) {
 		done <- struct{}{}
 	}()
 
+	// The first direction to finish ends the session. Waiting for both would
+	// hold the vsock open after the target closed, and the host proxy has no
+	// other way to learn the tunnel is dead: it would keep handing it to new
+	// requests. Shutdown (not Close) wakes the goroutine still blocked in
+	// Read; the raw fd is closed only after both exit so it can't be reused
+	// underneath them.
 	<-done
+	_ = syscall.Shutdown(fd, syscall.SHUT_RDWR)
+	_ = target.Close()
 	<-done
-	syscall.Close(fd)
 }
 
 func copyFDToConn(fd int, dst net.Conn) {

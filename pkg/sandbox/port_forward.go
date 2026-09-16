@@ -177,10 +177,13 @@ func (m *PortForwardManager) proxyConn(ctx context.Context, clientConn net.Conn,
 		done <- struct{}{}
 	}()
 
+	// Return on the first finished direction. The vsock transport has no
+	// half-close (VirtioSocketConnection lacks CloseWrite), so once the client
+	// goes away the guest->client copy blocks forever and the deferred Closes
+	// never run, leaking both sockets for the life of the VM.
 	select {
 	case <-ctx.Done():
 	case <-done:
-		<-done
 	}
 }
 
