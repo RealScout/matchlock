@@ -98,6 +98,17 @@ func (i *HTTPInterceptor) HandleHTTP(guestConn net.Conn, dstIP string, dstPort i
 			return
 		}
 
+		if isWebSocketUpgrade(modifiedReq, modifiedResp) {
+			i.emitEvent(modifiedReq, modifiedResp, host, time.Since(start))
+			if err := writeResponse(guestConn, modifiedResp); err != nil {
+				pc.conn.Close()
+				return
+			}
+			tunnel(guestConn, guestReader, pc.conn, pc.reader)
+			pc.conn.Close()
+			return
+		}
+
 		if isStreamingResponse(modifiedResp) {
 			i.emitEvent(modifiedReq, modifiedResp, host, time.Since(start))
 			err := writeResponseHeadersAndStreamBody(guestConn, modifiedResp)
@@ -198,6 +209,15 @@ func (i *HTTPInterceptor) HandleHTTPS(guestConn net.Conn, dstIP string, dstPort 
 			i.emitBlockedEvent(modifiedReq, serverName, err.Error())
 			writeHTTPError(tlsConn, http.StatusForbidden, "Blocked by policy")
 			resp.Body.Close()
+			return
+		}
+
+		if isWebSocketUpgrade(modifiedReq, modifiedResp) {
+			i.emitEvent(modifiedReq, modifiedResp, serverName, time.Since(start))
+			if err := writeResponse(tlsConn, modifiedResp); err != nil {
+				return
+			}
+			tunnel(tlsConn, guestReader, realConn, serverReader)
 			return
 		}
 
@@ -302,6 +322,48 @@ func writeResponse(conn net.Conn, resp *http.Response) error {
 		return err
 	}
 	return bw.Flush()
+}
+
+// isWebSocketUpgrade is deliberately narrow: only a guest-requested websocket
+// upgrade that the upstream accepted turns the connection into a raw tunnel.
+// Any other 101 keeps the per-request policy loop.
+func isWebSocketUpgrade(req *http.Request, resp *http.Response) bool {
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		return false
+	}
+	return headerHasToken(req.Header, "Connection", "upgrade") &&
+		strings.EqualFold(req.Header.Get("Upgrade"), "websocket") &&
+		strings.EqualFold(resp.Header.Get("Upgrade"), "websocket")
+}
+
+func headerHasToken(h http.Header, key, token string) bool {
+	for _, v := range h.Values(key) {
+		for _, part := range strings.Split(v, ",") {
+			if strings.EqualFold(strings.TrimSpace(part), token) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// tunnel copies bytes both ways until either side closes. Bytes the bufio
+// readers already pulled off the wire past the handshake belong to the
+// websocket stream, so they are forwarded first.
+func tunnel(guest net.Conn, guestReader *bufio.Reader, server net.Conn, serverReader *bufio.Reader) {
+	done := make(chan struct{}, 2)
+	go func() {
+		io.Copy(server, guestReader)
+		done <- struct{}{}
+	}()
+	go func() {
+		io.Copy(guest, serverReader)
+		done <- struct{}{}
+	}()
+	<-done
+	guest.SetDeadline(time.Now())
+	server.SetDeadline(time.Now())
+	<-done
 }
 
 func isStreamingResponse(resp *http.Response) bool {
